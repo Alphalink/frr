@@ -325,12 +325,41 @@ void static_uninstall_nexthop(struct static_nexthop *nh)
 	static_uninstall_path(pn);
 }
 
+/*
+ * Recalculate pn->tag after a nexthop is added, removed, or migrated
+ * between paths.  Scans pn->nexthop_list and sets pn->tag to the maximum
+ * nh->tag value (max-wins).  Resets to 0 when the list is empty.
+ *
+ * Max-wins is order-independent: the result depends only on the set of
+ * configured nexthops, making the per-leaf callbacks idempotent.
+ */
+void static_path_recalc_tag(struct static_path *pn)
+{
+	struct static_nexthop *nh;
+	route_tag_t max_tag = 0;
+
+	frr_each (static_nexthop_list, &pn->nexthop_list, nh) {
+		if (nh->tag > max_tag)
+			max_tag = nh->tag;
+	}
+	pn->tag = max_tag;
+}
+
 void static_delete_nexthop(struct static_nexthop *nh)
 {
 	struct static_path *pn = nh->pn;
 	struct route_node *rn = pn->rn;
 
 	static_nexthop_list_del(&(pn->nexthop_list), nh);
+
+	/*
+	 * Recalculate pn->tag only when the deleted nexthop carried the
+	 * current maximum tag value (nh->tag == pn->tag).  Removing any
+	 * nexthop whose tag was below the max cannot change the max.
+	 */
+	if (pn->tag == nh->tag)
+		static_path_recalc_tag(pn);
+
 	/* Remove BFD session/configuration if any. */
 	bfd_sess_free(&nh->bsp);
 

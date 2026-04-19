@@ -140,6 +140,13 @@ struct static_nexthop {
 	/* SRv6 Seg information */
 	struct static_nh_seg snh_seg;
 
+	/* Tag configured for this individual nexthop (YANG per-nexthop value).
+	 * pn->tag is the maximum nh->tag across the path's nexthops; this
+	 * field is read by static_path_recalc_tag() when nexthops are added,
+	 * removed, or migrated between paths.
+	 */
+	route_tag_t tag;
+
 	/*
 	 * Whether to pretend the nexthop is directly attached to the specified
 	 * link. Only meaningful when both a gateway address and interface name
@@ -210,6 +217,7 @@ static_add_nexthop(struct static_path *pn, enum static_nh_type type,
 extern void static_install_nexthop(struct static_nexthop *nh);
 extern void static_uninstall_nexthop(struct static_nexthop *nh);
 
+extern void static_path_recalc_tag(struct static_path *pn);
 extern void static_delete_nexthop(struct static_nexthop *nh);
 
 extern void static_ifindex_update(struct interface *ifp, bool up);

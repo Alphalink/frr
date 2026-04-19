@@ -23,15 +23,89 @@
 #include "static_srv6.h"
 #include "static_debug.h"
 
+/* Accumulator passed to path_list_ecmp_iter_cb() to count nexthops in the
+ * same ECMP group (those sharing table-id and distance) and track whether
+ * the group contains blackhole or non-blackhole nexthops.
+ */
+struct path_list_ecmp_check {
+	uint32_t table_id;
+	uint8_t distance;
+	uint32_t count;
+	bool has_blackhole;
+	bool has_non_blackhole;
+};
+
+static int path_list_ecmp_iter_cb(const struct lyd_node *dnode, void *arg)
+{
+	struct path_list_ecmp_check *ec = arg;
+	enum static_nh_type nh_type;
+
+	if (yang_dnode_get_uint32(dnode, "table-id") != ec->table_id ||
+	    yang_dnode_get_uint8(dnode, "distance") != ec->distance)
+		return YANG_ITER_CONTINUE;
+
+	ec->count++;
+	nh_type = yang_dnode_get_enum(dnode, "nh-type");
+	if (nh_type == STATIC_BLACKHOLE)
+		ec->has_blackhole = true;
+	else
+		ec->has_non_blackhole = true;
+
+	return YANG_ITER_CONTINUE;
+}
+
+/*
+ * Validate ECMP constraints for the path-list entry at path_list_dnode.
+ * Counts existing nexthops in the same ECMP group (same table-id and
+ * distance) and rejects blackhole/non-blackhole mixing or exceeding the
+ * ECMP limit.  Called from NB_EV_VALIDATE in both path-list create and
+ * distance_modify.
+ */
+static int ecmp_path_list_validate(const struct lyd_node *path_list_dnode, char *errmsg,
+				   size_t errmsg_len)
+{
+	struct path_list_ecmp_check ec = {
+		.table_id = yang_dnode_get_uint32(path_list_dnode, "table-id"),
+		.distance = yang_dnode_get_uint8(path_list_dnode, "distance"),
+	};
+	const struct lyd_node *route_dnode;
+	enum static_nh_type nh_type;
+
+	route_dnode = yang_dnode_get_parent(path_list_dnode, "route-list");
+	yang_dnode_iterate(path_list_ecmp_iter_cb, &ec, route_dnode, "./path-list");
+
+	nh_type = yang_dnode_get_enum(path_list_dnode, "nh-type");
+	if (nh_type == STATIC_BLACKHOLE && ec.has_non_blackhole) {
+		snprintf(errmsg, errmsg_len,
+			 "Route cannot have blackhole and non-blackhole nexthops simultaneously");
+		return NB_ERR_VALIDATION;
+	}
+	if (nh_type != STATIC_BLACKHOLE && ec.has_blackhole) {
+		snprintf(errmsg, errmsg_len,
+			 "Route cannot have blackhole and non-blackhole nexthops simultaneously");
+		return NB_ERR_VALIDATION;
+	}
+	if (ec.count > zebra_ecmp_count) {
+		snprintf(errmsg, errmsg_len, "Route cannot have more than %u ECMP nexthops",
+			 zebra_ecmp_count);
+		return NB_ERR_VALIDATION;
+	}
+	return NB_OK;
+}
 
 static int static_path_list_create(struct nb_cb_create_args *args)
 {
 	struct route_node *rn;
 	struct static_path *pn;
+	struct static_nexthop *nh;
 	const struct lyd_node *vrf_dnode;
 	const char *vrf;
 	uint8_t distance;
 	uint32_t table_id;
+	struct ipaddr ipaddr;
+	enum static_nh_type nh_type;
+	const char *ifname;
+	const char *nh_vrf;
 
 	switch (args->event) {
 	case NB_EV_VALIDATE:
@@ -53,7 +127,18 @@ static int static_path_list_create(struct nb_cb_create_args *args)
 				"%% table param only available when running on netns-based vrfs");
 			return NB_ERR_VALIDATION;
 		}
-		break;
+		ifname = yang_dnode_get_string(args->dnode, "interface");
+		if (ifname != NULL) {
+			if (strcasecmp(ifname, "Null0") == 0 || strcasecmp(ifname, "reject") == 0 ||
+			    strcasecmp(ifname, "blackhole") == 0) {
+				snprintf(args->errmsg, args->errmsg_len,
+					 "%s: Nexthop interface name can not be from reserved keywords(Null0, reject, blackhole)",
+					 ifname);
+				return NB_ERR_VALIDATION;
+			}
+		}
+
+		return ecmp_path_list_validate(args->dnode, args->errmsg, args->errmsg_len);
 	case NB_EV_ABORT:
 	case NB_EV_PREPARE:
 		break;
@@ -62,134 +147,20 @@ static int static_path_list_create(struct nb_cb_create_args *args)
 		distance = yang_dnode_get_uint8(args->dnode, "distance");
 		table_id = yang_dnode_get_uint32(args->dnode, "table-id");
 		pn = static_add_path(rn, table_id, distance);
-		nb_running_set_entry(args->dnode, pn);
-	}
 
-	return NB_OK;
-}
-
-static int static_path_list_destroy(struct nb_cb_destroy_args *args)
-{
-	struct static_path *pn;
-
-	switch (args->event) {
-	case NB_EV_VALIDATE:
-	case NB_EV_PREPARE:
-	case NB_EV_ABORT:
-		break;
-	case NB_EV_APPLY:
-		pn = nb_running_unset_entry(args->dnode);
-		static_del_path(pn);
-		break;
-	}
-
-	return NB_OK;
-}
-
-static int static_path_list_tag_modify(struct nb_cb_modify_args *args)
-{
-	struct static_path *pn;
-
-	switch (args->event) {
-	case NB_EV_VALIDATE:
-	case NB_EV_ABORT:
-	case NB_EV_PREPARE:
-		break;
-	case NB_EV_APPLY:
-		pn = nb_running_get_entry(args->dnode, NULL, true);
-		pn->tag = yang_dnode_get_uint32(args->dnode, NULL);
-		static_install_path(pn);
-		break;
-	}
-
-	return NB_OK;
-}
-
-struct nexthop_iter {
-	uint32_t count;
-	bool blackhole;
-};
-
-static int nexthop_iter_cb(const struct lyd_node *dnode, void *arg)
-{
-	struct nexthop_iter *iter = arg;
-	enum static_nh_type nh_type;
-
-	nh_type = yang_dnode_get_enum(dnode, "nh-type");
-
-	if (nh_type == STATIC_BLACKHOLE)
-		iter->blackhole = true;
-
-	iter->count++;
-
-	return YANG_ITER_CONTINUE;
-}
-
-static bool static_nexthop_create(struct nb_cb_create_args *args)
-{
-	const struct lyd_node *pn_dnode;
-	struct nexthop_iter iter;
-	struct static_path *pn;
-	struct ipaddr ipaddr;
-	struct static_nexthop *nh;
-	enum static_nh_type nh_type;
-	const char *ifname;
-	const char *nh_vrf;
-
-	switch (args->event) {
-	case NB_EV_VALIDATE:
-		ifname = yang_dnode_get_string(args->dnode, "interface");
-		if (ifname != NULL) {
-			if (strcasecmp(ifname, "Null0") == 0
-			    || strcasecmp(ifname, "reject") == 0
-			    || strcasecmp(ifname, "blackhole") == 0) {
-				snprintf(args->errmsg, args->errmsg_len,
-					"%s: Nexthop interface name can not be from reserved keywords(Null0, reject, blackhole)",
-					ifname);
-				return NB_ERR_VALIDATION;
-			}
-		}
-
-		iter.count = 0;
-		iter.blackhole = false;
-
-		pn_dnode = yang_dnode_get_parent(args->dnode, "path-list");
-		yang_dnode_iterate(nexthop_iter_cb, &iter, pn_dnode,
-				   "./frr-nexthops/nexthop");
-
-		if (iter.blackhole && iter.count > 1) {
-			snprintf(
-				args->errmsg, args->errmsg_len,
-				"Route cannot have blackhole and non-blackhole nexthops simultaneously");
-			return NB_ERR_VALIDATION;
-		} else if (iter.count > zebra_ecmp_count) {
-			snprintf(args->errmsg, args->errmsg_len,
-				"Route cannot have more than %d ECMP nexthops",
-				 zebra_ecmp_count);
-			return NB_ERR_VALIDATION;
-		}
-		break;
-	case NB_EV_PREPARE:
-	case NB_EV_ABORT:
-		break;
-	case NB_EV_APPLY:
 		yang_dnode_get_ip(&ipaddr, args->dnode, "gateway");
 		nh_type = yang_dnode_get_enum(args->dnode, "nh-type");
 		ifname = yang_dnode_get_string(args->dnode, "interface");
 		nh_vrf = yang_dnode_get_string(args->dnode, "vrf");
-		pn = nb_running_get_entry(args->dnode, NULL, true);
 
 		if (strmatch(ifname, "(null)"))
 			ifname = "";
 
 		if (!static_add_nexthop_validate(nh_vrf, nh_type, &ipaddr))
-			flog_warn(
-				EC_LIB_NB_CB_CONFIG_VALIDATE,
-				"Warning!! Local connected address is configured as Gateway IP((%s))",
-				yang_dnode_get_string(args->dnode,
-						      "./gateway"));
-		nh = static_add_nexthop(pn, nh_type, &ipaddr, ifname, nh_vrf,
-					0);
+			flog_warn(EC_LIB_NB_CB_CONFIG_VALIDATE,
+				  "Warning!! Local connected address is configured as Gateway IP((%s))",
+				  yang_dnode_get_string(args->dnode, "./gateway"));
+		nh = static_add_nexthop(pn, nh_type, &ipaddr, ifname, nh_vrf, 0);
 		nb_running_set_entry(args->dnode, nh);
 		break;
 	}
@@ -197,9 +168,10 @@ static bool static_nexthop_create(struct nb_cb_create_args *args)
 	return NB_OK;
 }
 
-static bool static_nexthop_destroy(struct nb_cb_destroy_args *args)
+static int static_path_list_destroy(struct nb_cb_destroy_args *args)
 {
 	struct static_nexthop *nh;
+	struct static_path *pn;
 
 	switch (args->event) {
 	case NB_EV_VALIDATE:
@@ -208,7 +180,123 @@ static bool static_nexthop_destroy(struct nb_cb_destroy_args *args)
 		break;
 	case NB_EV_APPLY:
 		nh = nb_running_unset_entry(args->dnode);
+		pn = nh->pn;
 		static_delete_nexthop(nh);
+		if (static_nexthop_list_count(&pn->nexthop_list) == 0)
+			static_del_path(pn);
+		break;
+	}
+
+	return NB_OK;
+}
+
+static int static_path_list_tag_modify(struct nb_cb_modify_args *args)
+{
+	struct static_nexthop *nh;
+	struct static_path *pn;
+	uint32_t old_tag;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_ABORT:
+	case NB_EV_PREPARE:
+		break;
+	case NB_EV_APPLY:
+		nh = nb_running_get_entry(args->dnode, NULL, true);
+		pn = nh->pn;
+
+		/*
+		 * Update nh->tag and recompute pn->tag (max-wins across the
+		 * path's nexthops).  Skip the install when the effective path
+		 * tag is unchanged — this also makes setting the same value
+		 * idempotent.
+		 */
+		nh->tag = yang_dnode_get_uint32(args->dnode, NULL);
+		old_tag = pn->tag;
+		static_path_recalc_tag(pn);
+		if (pn->tag == old_tag)
+			break;
+
+		/*
+		 * Do not call static_install_path() here; apply_finish()
+		 * fires after all per-leaf callbacks complete and performs
+		 * the single install for this path-list entry.
+		 *
+		 * Mark the nexthop as needing reinstall so that
+		 * static_nht_update_path() issues a route ADD when
+		 * apply_finish() calls static_install_nexthop() via the
+		 * NHT fast path (nh->state must be STATIC_START, not
+		 * STATIC_INSTALLED, for the update to reach zebra).
+		 */
+		nh->state = STATIC_START;
+		break;
+	}
+
+	return NB_OK;
+}
+
+static int static_path_list_distance_modify(struct nb_cb_modify_args *args)
+{
+	struct static_nexthop *nh;
+	struct static_path *old_pn, *new_pn;
+	struct route_node *rn;
+	const struct lyd_node *pl;
+	uint8_t distance;
+	uint32_t table_id;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+		pl = yang_dnode_get_parent(args->dnode, "path-list");
+		return ecmp_path_list_validate(pl, args->errmsg, args->errmsg_len);
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		break;
+	case NB_EV_APPLY:
+		nh = nb_running_get_entry(args->dnode, NULL, true);
+		old_pn = nh->pn;
+		distance = yang_dnode_get_uint8(args->dnode, NULL);
+		/*
+		 * distance_modify fires during initial route creation as
+		 * well as on explicit distance changes.  Skip the
+		 * path-move when the value has not actually changed.
+		 */
+		if (distance == old_pn->distance)
+			break;
+		rn = old_pn->rn;
+		table_id = old_pn->table_id;
+
+		/*
+		 * Remove nh from old_pn before uninstalling so that
+		 * static_uninstall_nexthop() sees the correct nexthop count
+		 * (sends a route delete, not an update, when nh was the last
+		 * nexthop on the old path).  Recalculate old_pn->tag first:
+		 * if nh carried the current max tag, any remaining ECMP
+		 * nexthops must get the correct tag in the route-update
+		 * sent to zebra.
+		 */
+		static_nexthop_list_del(&old_pn->nexthop_list, nh);
+		if (old_pn->tag == nh->tag)
+			static_path_recalc_tag(old_pn);
+		static_uninstall_nexthop(nh);
+		if (static_nexthop_list_count(&old_pn->nexthop_list) == 0)
+			static_del_path(old_pn);
+
+		new_pn = static_add_path(rn, table_id, distance);
+		nh->pn = new_pn;
+		static_nexthop_list_add_tail(&new_pn->nexthop_list, nh);
+		/*
+		 * Propagate the tag to the new path.  tag_modify does not
+		 * re-fire, so recalculate from the nexthops now on new_pn.
+		 */
+		static_path_recalc_tag(new_pn);
+		/*
+		 * static_uninstall_nexthop() does not reset nh->state, so it
+		 * can remain STATIC_INSTALLED after the old path is torn down.
+		 * Reset to STATIC_START so apply_finish() →
+		 * static_install_nexthop() → static_nht_update_path() issues
+		 * a route ADD on the new path.
+		 */
+		nh->state = STATIC_START;
 		break;
 	}
 
@@ -548,7 +636,7 @@ static int static_nexthop_bh_type_modify(struct nb_cb_modify_args *args)
 	return NB_OK;
 }
 
-void routing_control_plane_protocols_control_plane_protocol_staticd_route_list_path_list_frr_nexthops_nexthop_apply_finish(
+void routing_control_plane_protocols_control_plane_protocol_staticd_route_list_path_list_apply_finish(
 	struct nb_cb_apply_finish_args *args)
 {
 	struct static_nexthop *nh;
@@ -558,7 +646,7 @@ void routing_control_plane_protocols_control_plane_protocol_staticd_route_list_p
 	static_install_nexthop(nh);
 }
 
-int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_path_list_frr_nexthops_nexthop_pre_validate(
+int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_path_list_pre_validate(
 	struct nb_cb_pre_validate_args *args)
 {
 	const struct lyd_node *mls_dnode;
@@ -743,25 +831,19 @@ int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_pa
 
 /*
  * XPath:
- * /frr-routing:routing/control-plane-protocols/control-plane-protocol/frr-staticd:staticd/route-list/path-list/frr-nexthops/nexthop
+ * /frr-routing:routing/control-plane-protocols/control-plane-protocol/frr-staticd:staticd/route-list/path-list/distance
  */
-int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_path_list_frr_nexthops_nexthop_create(
-	struct nb_cb_create_args *args)
+int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_path_list_distance_modify(
+	struct nb_cb_modify_args *args)
 {
-	return static_nexthop_create(args);
-}
-
-int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_path_list_frr_nexthops_nexthop_destroy(
-	struct nb_cb_destroy_args *args)
-{
-	return static_nexthop_destroy(args);
+	return static_path_list_distance_modify(args);
 }
 
 /*
  * XPath:
- * /frr-routing:routing/control-plane-protocols/control-plane-protocol/frr-staticd:staticd/route-list/path-list/frr-nexthops/nexthop/bh-type
+ * /frr-routing:routing/control-plane-protocols/control-plane-protocol/frr-staticd:staticd/route-list/path-list/bh-type
  */
-int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_path_list_frr_nexthops_nexthop_bh_type_modify(
+int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_path_list_bh_type_modify(
 	struct nb_cb_modify_args *args)
 {
 	return static_nexthop_bh_type_modify(args);
@@ -769,9 +851,9 @@ int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_pa
 
 /*
  * XPath:
- * /frr-routing:routing/control-plane-protocols/control-plane-protocol/frr-staticd:staticd/route-list/path-list/frr-nexthops/nexthop/onlink
+ * /frr-routing:routing/control-plane-protocols/control-plane-protocol/frr-staticd:staticd/route-list/path-list/onlink
  */
-int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_path_list_frr_nexthops_nexthop_onlink_modify(
+int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_path_list_onlink_modify(
 	struct nb_cb_modify_args *args)
 {
 	return static_nexthop_onlink_modify(args);
@@ -779,9 +861,9 @@ int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_pa
 
 /*
  * XPath:
- * /frr-routing:routing/control-plane-protocols/control-plane-protocol/frr-staticd:staticd/route-list/path-list/frr-nexthops/nexthop/srte-color
+ * /frr-routing:routing/control-plane-protocols/control-plane-protocol/frr-staticd:staticd/route-list/path-list/srte-color
  */
-int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_path_list_frr_nexthops_nexthop_color_modify(
+int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_path_list_color_modify(
 	struct nb_cb_modify_args *args)
 {
 	switch (args->event) {
@@ -798,7 +880,7 @@ int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_pa
 	return NB_OK;
 }
 
-int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_path_list_frr_nexthops_nexthop_color_destroy(
+int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_path_list_color_destroy(
 	struct nb_cb_destroy_args *args)
 {
 	switch (args->event) {
@@ -816,15 +898,15 @@ int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_pa
 
 /*
  * XPath:
- * /frr-routing:routing/control-plane-protocols/control-plane-protocol/frr-staticd:staticd/route-list/path-list/frr-nexthops/nexthop/srv6-segs-stack/entry
+ * /frr-routing:routing/control-plane-protocols/control-plane-protocol/frr-staticd:staticd/route-list/path-list/srv6-segs-stack/entry
  */
-int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_path_list_frr_nexthops_nexthop_srv6_segs_stack_entry_create(
+int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_path_list_srv6_segs_stack_entry_create(
 	struct nb_cb_create_args *args)
 {
 	return nexthop_srv6_segs_stack_entry_create(args);
 }
 
-int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_path_list_frr_nexthops_nexthop_srv6_segs_stack_entry_destroy(
+int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_path_list_srv6_segs_stack_entry_destroy(
 	struct nb_cb_destroy_args *args)
 {
 	return nexthop_srv6_segs_stack_entry_destroy(args);
@@ -832,9 +914,9 @@ int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_pa
 
 /*
  * XPath:
- * /frr-routing:routing/control-plane-protocols/control-plane-protocol/frr-staticd:staticd/route-list/path-list/frr-nexthops/nexthop/srv6-segs-stack/entry/seg
+ * /frr-routing:routing/control-plane-protocols/control-plane-protocol/frr-staticd:staticd/route-list/path-list/srv6-segs-stack/entry/seg
  */
-int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_path_list_frr_nexthops_nexthop_srv6_segs_stack_entry_seg_modify(
+int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_path_list_srv6_segs_stack_entry_seg_modify(
 	struct nb_cb_modify_args *args)
 {
 	switch (args->event) {
@@ -850,7 +932,7 @@ int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_pa
 	return NB_OK;
 }
 
-int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_path_list_frr_nexthops_nexthop_srv6_segs_stack_entry_seg_destroy(
+int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_path_list_srv6_segs_stack_entry_seg_destroy(
 	struct nb_cb_destroy_args *args)
 {
 	/*
@@ -870,9 +952,9 @@ int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_pa
 
 /*
  * XPath:
- * /frr-routing:routing/control-plane-protocols/control-plane-protocol/frr-staticd:staticd/route-list/path-list/frr-nexthops/nexthop/srv6-segs-stack/encap-behavior
+ * /frr-routing:routing/control-plane-protocols/control-plane-protocol/frr-staticd:staticd/route-list/path-list/srv6-segs-stack/encap-behavior
  */
-int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_path_list_frr_nexthops_nexthop_srv6_segs_stack_encap_behavior_modify(
+int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_path_list_srv6_segs_stack_encap_behavior_modify(
 	struct nb_cb_modify_args *args)
 {
 	switch (args->event) {
@@ -888,7 +970,7 @@ int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_pa
 	return NB_OK;
 }
 
-int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_path_list_frr_nexthops_nexthop_srv6_segs_stack_encap_behavior_destroy(
+int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_path_list_srv6_segs_stack_encap_behavior_destroy(
 	struct nb_cb_destroy_args *args)
 {
 	switch (args->event) {
@@ -906,15 +988,15 @@ int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_pa
 
 /*
  * XPath:
- * /frr-routing:routing/control-plane-protocols/control-plane-protocol/frr-staticd:staticd/route-list/path-list/frr-nexthops/nexthop/mpls-label-stack/entry
+ * /frr-routing:routing/control-plane-protocols/control-plane-protocol/frr-staticd:staticd/route-list/path-list/mpls-label-stack/entry
  */
-int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_path_list_frr_nexthops_nexthop_mpls_label_stack_entry_create(
+int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_path_list_mpls_label_stack_entry_create(
 	struct nb_cb_create_args *args)
 {
 	return nexthop_mpls_label_stack_entry_create(args);
 }
 
-int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_path_list_frr_nexthops_nexthop_mpls_label_stack_entry_destroy(
+int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_path_list_mpls_label_stack_entry_destroy(
 	struct nb_cb_destroy_args *args)
 {
 	return nexthop_mpls_label_stack_entry_destroy(args);
@@ -922,9 +1004,9 @@ int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_pa
 
 /*
  * XPath:
- * /frr-routing:routing/control-plane-protocols/control-plane-protocol/frr-staticd:staticd/route-list/path-list/frr-nexthops/nexthop/mpls-label-stack/entry/label
+ * /frr-routing:routing/control-plane-protocols/control-plane-protocol/frr-staticd:staticd/route-list/path-list/mpls-label-stack/entry/label
  */
-int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_path_list_frr_nexthops_nexthop_mpls_label_stack_entry_label_modify(
+int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_path_list_mpls_label_stack_entry_label_modify(
 	struct nb_cb_modify_args *args)
 {
 	switch (args->event) {
@@ -940,7 +1022,7 @@ int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_pa
 	return NB_OK;
 }
 
-int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_path_list_frr_nexthops_nexthop_mpls_label_stack_entry_label_destroy(
+int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_path_list_mpls_label_stack_entry_label_destroy(
 	struct nb_cb_destroy_args *args)
 {
 	/*
@@ -960,9 +1042,9 @@ int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_pa
 
 /*
  * XPath:
- * /frr-routing:routing/control-plane-protocols/control-plane-protocol/frr-staticd:staticd/route-list/path-list/frr-nexthops/nexthop/mpls-label-stack/entry/ttl
+ * /frr-routing:routing/control-plane-protocols/control-plane-protocol/frr-staticd:staticd/route-list/path-list/mpls-label-stack/entry/ttl
  */
-int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_path_list_frr_nexthops_nexthop_mpls_label_stack_entry_ttl_modify(
+int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_path_list_mpls_label_stack_entry_ttl_modify(
 	struct nb_cb_modify_args *args)
 {
 	switch (args->event) {
@@ -976,7 +1058,7 @@ int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_pa
 	return NB_OK;
 }
 
-int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_path_list_frr_nexthops_nexthop_mpls_label_stack_entry_ttl_destroy(
+int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_path_list_mpls_label_stack_entry_ttl_destroy(
 	struct nb_cb_destroy_args *args)
 {
 	switch (args->event) {
@@ -992,9 +1074,9 @@ int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_pa
 
 /*
  * XPath:
- * /frr-routing:routing/control-plane-protocols/control-plane-protocol/frr-staticd:staticd/route-list/path-list/frr-nexthops/nexthop/mpls-label-stack/entry/traffic-class
+ * /frr-routing:routing/control-plane-protocols/control-plane-protocol/frr-staticd:staticd/route-list/path-list/mpls-label-stack/entry/traffic-class
  */
-int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_path_list_frr_nexthops_nexthop_mpls_label_stack_entry_traffic_class_modify(
+int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_path_list_mpls_label_stack_entry_traffic_class_modify(
 	struct nb_cb_modify_args *args)
 {
 	switch (args->event) {
@@ -1008,7 +1090,7 @@ int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_pa
 	return NB_OK;
 }
 
-int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_path_list_frr_nexthops_nexthop_mpls_label_stack_entry_traffic_class_destroy(
+int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_path_list_mpls_label_stack_entry_traffic_class_destroy(
 	struct nb_cb_destroy_args *args)
 {
 	switch (args->event) {
@@ -1078,13 +1160,12 @@ int route_next_hop_bfd_source_destroy(struct nb_cb_destroy_args *args)
 	sn = nb_running_get_entry(args->dnode, NULL, true);
 	static_next_hop_bfd_auto_source(sn);
 
-	/* NHT information are needed by BFD to automatically find the source
-	 *
-	 * Force zebra to resend the information to BFD by unregistering and
-	 * registering again NHT. The (...)/frr-nexthops/nexthop northbound
-	 * apply_finish function will trigger a call to static_install_nexthop()
-	 * that does a call to static_zebra_nht_register(nh, true);
-	 * static_zebra_nht_register(sn, false);
+	/*
+	 * NHT information is needed by BFD to automatically find the source.
+	 * Force zebra to resend the NHT data by unregistering and registering
+	 * again.  The path-list apply_finish callback calls
+	 * static_install_nexthop() which re-registers via
+	 * static_zebra_nht_register(nh, true).
 	 */
 	static_zebra_nht_register(sn, false);
 
