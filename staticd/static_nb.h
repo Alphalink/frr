@@ -29,6 +29,8 @@ int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_pa
 	struct nb_cb_destroy_args *args);
 int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_path_list_tag_modify(
 	struct nb_cb_modify_args *args);
+int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_path_list_metric_modify(
+	struct nb_cb_modify_args *args);
 int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_path_list_distance_modify(
 	struct nb_cb_modify_args *args);
 int routing_control_plane_protocols_control_plane_protocol_staticd_route_list_path_list_bh_type_modify(
@@ -142,6 +144,7 @@ int routing_control_plane_protocols_name_validate(
 	"path-list[table-id='%u'][nh-type='%s'][vrf='%s'][gateway='%s'][interface='%s']"
 
 #define FRR_STATIC_ROUTE_PATH_DISTANCE_XPATH "/distance"
+#define FRR_STATIC_ROUTE_PATH_METRIC_XPATH   "/metric"
 #define FRR_STATIC_ROUTE_PATH_TAG_XPATH "/tag"
 
 #define FRR_STATIC_ROUTE_NH_ONLINK_XPATH "/onlink"
