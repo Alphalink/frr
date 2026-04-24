@@ -63,6 +63,15 @@ module frr-staticd {
      (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
      OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.";
 
+  revision 2026-04-19 {
+    description
+      "Add 'metric' as a non-key path-list attribute with default 0.
+       Nexthops sharing (table-id, distance, metric) form one ECMP group
+       in the RIB; nexthops with different metrics are separate RIB entries
+       enabling metric-based floating static routes.";
+    reference "FRRouting";
+  }
+
   revision 2026-04-18 {
     description
       "Flatten path-list: replace the two-level path-list/nexthop hierarchy
@@ -91,8 +100,9 @@ module frr-staticd {
       key "table-id nh-type vrf gateway interface";
       description
         "List of paths associated with a staticd prefix.  Each entry
-         represents one nexthop; entries sharing the same table-id and
-         administrative distance are installed as ECMP in the RIB.";
+         represents one nexthop; entries sharing the same table-id,
+         administrative distance, and metric are installed as ECMP in
+         the RIB.";
       leaf table-id {
         type uint32;
         description
@@ -106,6 +116,15 @@ module frr-staticd {
         default "1";
         description
           "Admin distance associated with this route.";
+      }
+
+      leaf metric {
+        type uint32;
+        default "0";
+        description
+          "Route metric.  Nexthops sharing the same (table-id, distance,
+           metric) form one ECMP group; nexthops with different metrics
+           are separate RIB entries enabling metric-based floating routes.";
       }
 
       leaf tag {

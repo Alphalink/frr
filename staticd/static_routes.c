@@ -141,11 +141,19 @@ bool static_add_nexthop_validate(const char *nh_vrf_name,
 	return true;
 }
 
-struct static_path *static_add_path(struct route_node *rn, uint32_t table_id,
-				    uint8_t distance)
+struct static_path *static_add_path(struct route_node *rn, uint32_t table_id, uint8_t distance,
+				    uint32_t metric)
 {
 	struct static_path *pn;
 	struct static_route_info *si;
+
+	si = rn->info;
+
+	/* Return existing path if one already matches (table-id, distance, metric) */
+	frr_each (static_path_list, &si->path_list, pn) {
+		if (pn->table_id == table_id && pn->distance == distance && pn->metric == metric)
+			return pn;
+	}
 
 	route_lock_node(rn);
 
@@ -154,10 +162,10 @@ struct static_path *static_add_path(struct route_node *rn, uint32_t table_id,
 
 	pn->rn = rn;
 	pn->distance = distance;
+	pn->metric = metric;
 	pn->table_id = table_id;
 	static_nexthop_list_init(&(pn->nexthop_list));
 
-	si = rn->info;
 	static_path_list_add_head(&(si->path_list), pn);
 
 	return pn;
