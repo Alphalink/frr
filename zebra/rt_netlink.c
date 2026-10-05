@@ -104,6 +104,24 @@ struct buf_req {
 static const char ipv4_ll_buf[16] = "169.254.0.1";
 static struct in_addr ipv4_ll;
 
+/*
+ * When set, IPv4 routes with an IPv6 nexthop are sent to the kernel using
+ * RTA_VIA {AF_INET6, addr} (Linux >= 5.2) instead of the historical
+ * 169.254.0.1 + RTNH_F_ONLINK trick, so the kernel resolves the neighbor
+ * through NDP and no RA is needed to populate the fake IPv4 ARP entry.
+ */
+static bool v4_via_v6_rta_via;
+
+void rt_netlink_set_v4_via_v6_rta_via(bool enable)
+{
+	v4_via_v6_rta_via = enable;
+}
+
+bool rt_netlink_get_v4_via_v6_rta_via(void)
+{
+	return v4_via_v6_rta_via;
+}
+
 /* Is this a ipv4 over ipv6 route? */
 static bool is_route_v4_over_v6(unsigned char rtm_family,
 				enum nexthop_types_t nexthop_type)
@@ -520,7 +538,7 @@ static int parse_encap_seg6(struct rtattr *tb, struct in6_addr *segs,
 static struct nexthop
 parse_nexthop_unicast(ns_id_t ns_id, struct rtmsg *rtm, struct rtattr **tb,
 		      enum blackhole_type bh_type, int index, void *prefsrc,
-		      void *gate, afi_t afi, vrf_id_t vrf_id)
+		      void *gate, bool gate_v6, afi_t afi, vrf_id_t vrf_id)
 {
 	struct interface *ifp = NULL;
 	struct nexthop nh = {.weight = 1};
@@ -534,16 +552,17 @@ parse_nexthop_unicast(ns_id_t ns_id, struct rtmsg *rtm, struct rtattr **tb,
 
 	vrf_id_t nh_vrf_id = vrf_id;
 	size_t sz = (afi == AFI_IP) ? 4 : 16;
+	bool v6_gw = (afi == AFI_IP6) || gate_v6;
 
 	if (bh_type == BLACKHOLE_UNSPEC) {
 		if (index && !gate)
 			nh.type = NEXTHOP_TYPE_IFINDEX;
 		else if (index && gate)
-			nh.type = (afi == AFI_IP) ? NEXTHOP_TYPE_IPV4_IFINDEX
-						  : NEXTHOP_TYPE_IPV6_IFINDEX;
+			nh.type = v6_gw ? NEXTHOP_TYPE_IPV6_IFINDEX
+					: NEXTHOP_TYPE_IPV4_IFINDEX;
 		else if (!index && gate)
-			nh.type = (afi == AFI_IP) ? NEXTHOP_TYPE_IPV4
-						  : NEXTHOP_TYPE_IPV6;
+			nh.type = v6_gw ? NEXTHOP_TYPE_IPV6
+					: NEXTHOP_TYPE_IPV4;
 		else {
 			nh.type = NEXTHOP_TYPE_BLACKHOLE;
 			nh.bh_type = bh_type;
@@ -556,7 +575,7 @@ parse_nexthop_unicast(ns_id_t ns_id, struct rtmsg *rtm, struct rtattr **tb,
 	if (prefsrc)
 		memcpy(&nh.src, prefsrc, sz);
 	if (gate)
-		memcpy(&nh.gate, gate, sz);
+		memcpy(&nh.gate, gate, gate_v6 ? IPV6_MAX_BYTELEN : sz);
 
 	if (index) {
 		ifp = if_lookup_by_index_per_ns(zebra_ns_lookup(ns_id), index);
@@ -625,6 +644,7 @@ static uint16_t parse_multipath_nexthops_unicast(ns_id_t ns_id, struct nexthop_g
 	int num_segs = 0;
 	enum srv6_headend_behavior srv6_encap_behavior = SRV6_HEADEND_BEHAVIOR_H_ENCAPS;
 	struct rtattr *rtnh_tb[RTA_MAX + 1] = {};
+	bool gate_v6 = false;
 
 	int len = RTA_PAYLOAD(tb[RTA_MULTIPATH]);
 	vrf_id_t nh_vrf_id = vrf_id;
@@ -657,11 +677,27 @@ static uint16_t parse_multipath_nexthops_unicast(ns_id_t ns_id, struct nexthop_g
 		} else
 			nh_vrf_id = vrf_id;
 
+		/* The attribute tables are reused across nexthops */
+		gate = NULL;
+		gate_v6 = false;
+		memset(rtnh_tb, 0, sizeof(rtnh_tb));
+
 		if (rtnh->rtnh_len > sizeof(*rtnh)) {
 			netlink_parse_rtattr(rtnh_tb, RTA_MAX, RTNH_DATA(rtnh),
 					     rtnh->rtnh_len - sizeof(*rtnh));
 			if (rtnh_tb[RTA_GATEWAY])
 				gate = RTA_DATA(rtnh_tb[RTA_GATEWAY]);
+			else if (rtnh_tb[RTA_VIA] && rtm->rtm_family == AF_INET &&
+				 RTA_PAYLOAD(rtnh_tb[RTA_VIA]) >= 2 + IPV6_MAX_BYTELEN) {
+				uint16_t via_family;
+
+				memcpy(&via_family, RTA_DATA(rtnh_tb[RTA_VIA]),
+				       sizeof(via_family));
+				if (via_family == AF_INET6) {
+					gate = (uint8_t *)RTA_DATA(rtnh_tb[RTA_VIA]) + 2;
+					gate_v6 = true;
+				}
+			}
 			if (rtnh_tb[RTA_ENCAP] && rtnh_tb[RTA_ENCAP_TYPE]
 			    && *(uint16_t *)RTA_DATA(rtnh_tb[RTA_ENCAP_TYPE])
 				       == LWTUNNEL_ENCAP_MPLS) {
@@ -682,7 +718,13 @@ static uint16_t parse_multipath_nexthops_unicast(ns_id_t ns_id, struct nexthop_g
 			}
 		}
 
-		if (gate && rtm->rtm_family == AF_INET) {
+		if (gate && gate_v6) {
+			if (index)
+				nh = nexthop_from_ipv6_ifindex(gate, index,
+							       nh_vrf_id);
+			else
+				nh = nexthop_from_ipv6(gate, nh_vrf_id);
+		} else if (gate && rtm->rtm_family == AF_INET) {
 			if (index)
 				nh = nexthop_from_ipv4_ifindex(
 					gate, prefsrc, index, nh_vrf_id);
@@ -877,6 +919,18 @@ static int netlink_route_read_unicast_ctx(struct nlmsghdr *h, ns_id_t ns_id,
 	if (tb[RTA_GATEWAY]) {
 		gate = RTA_DATA(tb[RTA_GATEWAY]);
 		gate_len = RTA_PAYLOAD(tb[RTA_GATEWAY]);
+	} else if (tb[RTA_VIA] && rtm->rtm_family == AF_INET) {
+		/* IPv4 route with an IPv6 gateway: {u16 family, addr} */
+		uint8_t *via = RTA_DATA(tb[RTA_VIA]);
+		uint16_t via_family;
+
+		if (RTA_PAYLOAD(tb[RTA_VIA]) >= 2 + IPV6_MAX_BYTELEN) {
+			memcpy(&via_family, via, sizeof(via_family));
+			if (via_family == AF_INET6) {
+				gate = via + 2;
+				gate_len = IPV6_MAX_BYTELEN;
+			}
+		}
 	}
 
 	if (tb[RTA_NH_ID])
@@ -1030,7 +1084,7 @@ static int netlink_route_read_unicast_ctx(struct nlmsghdr *h, ns_id_t ns_id,
 		/* Convert to ipaddr */
 		memset(&addr, 0, sizeof(addr));
 
-		if (afi == AFI_IP) {
+		if (afi == AFI_IP && gate_len == IPV4_MAX_BYTELEN) {
 			SET_IPADDR_V4(&addr);
 			memcpy(&addr.ipaddr_v4, gate, gate_len);
 		} else {
@@ -1071,6 +1125,7 @@ int netlink_route_notify_read_ctx(struct nlmsghdr *h, ns_id_t ns_id,
 static int netlink_route_change_read_unicast_internal(struct nlmsghdr *h,
 						      ns_id_t ns_id, int startup)
 {
+	bool gate_v6 = false;
 	int len;
 	struct rtmsg *rtm;
 	struct rtattr *tb[RTA_MAX + 1];
@@ -1223,8 +1278,11 @@ static int netlink_route_change_read_unicast_internal(struct nlmsghdr *h,
 		prefsrc = (void *)&(prefsrc_addr->ip.addr);
 
 	gate_addr = dplane_ctx_get_route_gw(ctx);
-	if (!IS_IPADDR_NONE(gate_addr))
+	if (!IS_IPADDR_NONE(gate_addr)) {
 		gate = (void *)&(gate_addr->ip.addr);
+		/* IPv4 route learned with an IPv6 gateway (RTA_VIA) */
+		gate_v6 = IS_IPADDR_V6(gate_addr);
+	}
 
 	nhe_id = dplane_ctx_get_nhg_id(ctx);
 
@@ -1266,7 +1324,7 @@ static int netlink_route_change_read_unicast_internal(struct nlmsghdr *h,
 			if (!nhe_id) {
 				nh = parse_nexthop_unicast(
 					ns_id, rtm, tb, bh_type, index, prefsrc,
-					gate, afi, vrf_id);
+					gate, gate_v6, afi, vrf_id);
 
 				nexthop = nexthop_new();
 				*nexthop = nh;
@@ -1328,7 +1386,7 @@ static int netlink_route_change_read_unicast_internal(struct nlmsghdr *h,
 
 				nh = parse_nexthop_unicast(
 					ns_id, rtm, tb, bh_type, index, prefsrc,
-					gate, afi, vrf_id);
+					gate, gate_v6, afi, vrf_id);
 				rib_delete(afi, SAFI_UNICAST, vrf_id, proto, 0,
 					   flags, &p,
 					   (struct prefix_ipv6 *)&src_p, &nh, 0,
@@ -1629,6 +1687,20 @@ static bool _netlink_route_add_gateway_info(uint8_t route_family,
 	}
 
 	return true;
+}
+
+/* Encode an IPv6 gateway of an IPv4 route as RTA_VIA {AF_INET6, addr} */
+static bool _netlink_route_put_v4_via_v6(struct nlmsghdr *nlmsg,
+					 size_t req_size,
+					 const struct nexthop *nexthop)
+{
+	struct gw_family_t gw_fam;
+
+	gw_fam.family = AF_INET6;
+	memcpy(&gw_fam.gate.ipv6, &nexthop->gate.ipv6, IPV6_MAX_BYTELEN);
+
+	return nl_attr_put(nlmsg, req_size, RTA_VIA, &gw_fam.family,
+			   IPV6_MAX_BYTELEN + 2);
 }
 
 static int build_label_stack(struct mpls_label_stack *nh_label,
@@ -2081,6 +2153,29 @@ static bool _netlink_route_build_singlepath(const struct prefix *p,
 	if (CHECK_FLAG(nexthop->flags, NEXTHOP_FLAG_ONLINK))
 		rtmsg->rtm_flags |= RTNH_F_ONLINK;
 
+	if (is_route_v4_over_v6(rtmsg->rtm_family, nexthop->type) &&
+	    v4_via_v6_rta_via) {
+		/* Deletes are matched without the nexthop, like for IPv4 */
+		if (cmd != RTM_DELROUTE &&
+		    !_netlink_route_put_v4_via_v6(nlmsg, req_size, nexthop))
+			return false;
+		if (!nl_attr_put32(nlmsg, req_size, RTA_OIF, nexthop->ifindex))
+			return false;
+
+		if (cmd == RTM_NEWROUTE) {
+			if (!_netlink_route_encode_nexthop_src(
+				    nexthop, AF_INET, nlmsg, req_size, bytelen))
+				return false;
+		}
+
+		if (IS_ZEBRA_DEBUG_KERNEL)
+			zlog_debug("%s: RTA_VIA (%s): %pFX nexthop via inet6 %pI6 %s if %u vrf %u",
+				   __func__, routedesc, p, &nexthop->gate.ipv6,
+				   label_buf, nexthop->ifindex,
+				   nexthop->vrf_id);
+		return true;
+	}
+
 	if (is_route_v4_over_v6(rtmsg->rtm_family, nexthop->type)) {
 		rtmsg->rtm_flags |= RTNH_F_ONLINK;
 		if (!nl_attr_put(nlmsg, req_size, RTA_GATEWAY, &ipv4_ll, 4))
@@ -2268,6 +2363,28 @@ static bool _netlink_route_build_multipath(const struct prefix *p,
 
 	if (CHECK_FLAG(nexthop->flags, NEXTHOP_FLAG_ONLINK))
 		rtnh->rtnh_flags |= RTNH_F_ONLINK;
+
+	if (is_route_v4_over_v6(rtmsg->rtm_family, nexthop->type) &&
+	    v4_via_v6_rta_via) {
+		if (!_netlink_route_put_v4_via_v6(nlmsg, req_size, nexthop))
+			return false;
+		rtnh->rtnh_ifindex = nexthop->ifindex;
+		if (nexthop->weight)
+			rtnh->rtnh_hops = nexthop->weight - 1;
+
+		if (nexthop->rmap_src.ipv4.s_addr != INADDR_ANY)
+			*src = &nexthop->rmap_src;
+		else if (nexthop->src.ipv4.s_addr != INADDR_ANY)
+			*src = &nexthop->src;
+
+		if (IS_ZEBRA_DEBUG_KERNEL)
+			zlog_debug("%s: RTA_VIA (%s): %pFX nexthop via inet6 %pI6 %s if %u vrf %u",
+				   __func__, routedesc, p, &nexthop->gate.ipv6,
+				   label_buf, nexthop->ifindex,
+				   nexthop->vrf_id);
+		nl_attr_rtnh_end(nlmsg, rtnh);
+		return true;
+	}
 
 	if (is_route_v4_over_v6(rtmsg->rtm_family, nexthop->type)) {
 		rtnh->rtnh_flags |= RTNH_F_ONLINK;

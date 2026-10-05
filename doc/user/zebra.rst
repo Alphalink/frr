@@ -342,6 +342,18 @@ the default route.
    before removing it from the system if the nexthop group is no longer
    being used.  The default time is 180 seconds.
 
+.. clicmd:: zebra v4-via-v6 rta-via
+
+   Install IPv4 routes that have an IPv6 nexthop (static routes via a
+   link-local address, or BGP unnumbered / RFC 5549) in the Linux kernel with
+   ``RTA_VIA`` carrying the IPv6 address, like
+   ``ip route add 1.1.1.1/32 via inet6 fe80::2 dev eth0``. The kernel then
+   resolves the neighbor through NDP, so no Router Advertisement is needed.
+   The default is to use the historical ``169.254.0.1`` + ``onlink`` encoding,
+   which relies on an IPv4 neighbor entry learned from a received RA.
+   This requires Linux 5.2 or later and is only used when kernel nexthop
+   objects are not used for the route.
+
 .. clicmd:: ip nht resolve-via-default
 
    Allow IPv4 nexthop tracking to resolve via the default route. This parameter

@@ -48,6 +48,10 @@ extern "C" {
 
 void rt_netlink_init(void);
 
+/* Use RTA_VIA (AF_INET6) for IPv4 routes with an IPv6 nexthop */
+extern void rt_netlink_set_v4_via_v6_rta_via(bool enable);
+extern bool rt_netlink_get_v4_via_v6_rta_via(void);
+
 /* MPLS label forwarding table change, using dataplane context information. */
 extern ssize_t netlink_mpls_multipath_msg_encode(int cmd,
 						 struct zebra_dplane_ctx *ctx,

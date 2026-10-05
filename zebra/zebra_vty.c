@@ -47,6 +47,7 @@
 #include "northbound_cli.h"
 #include "zebra/zebra_nb.h"
 #include "zebra/kernel_netlink.h"
+#include "zebra/rt_netlink.h"
 #include "zebra/if_netlink.h"
 #include "zebra/table_manager.h"
 #include "zebra/zebra_script.h"
@@ -1608,6 +1609,18 @@ DEFPY_HIDDEN(nexthop_group_use_enable,
 	zebra_nhg_enable_kernel_nexthops(!no);
 	return CMD_SUCCESS;
 }
+
+#ifdef HAVE_NETLINK
+DEFPY(zebra_v4_via_v6_rta_via, zebra_v4_via_v6_rta_via_cmd,
+      "[no] zebra v4-via-v6 rta-via",
+      NO_STR ZEBRA_STR
+      "IPv4 routes with an IPv6 nexthop\n"
+      "Install in the kernel using RTA_VIA with the IPv6 nexthop (Linux >= 5.2)\n")
+{
+	rt_netlink_set_v4_via_v6_rta_via(!no);
+	return CMD_SUCCESS;
+}
+#endif /* HAVE_NETLINK */
 
 DEFPY_HIDDEN(proto_nexthop_group_only, proto_nexthop_group_only_cmd,
 	     "[no] zebra nexthop proto only",
@@ -3773,6 +3786,11 @@ static int config_write_protocol(struct vty *vty)
 	if (zebra_nhg_proto_nexthops_only())
 		vty_out(vty, "zebra nexthop proto only\n");
 
+#ifdef HAVE_NETLINK
+	if (rt_netlink_get_v4_via_v6_rta_via())
+		vty_out(vty, "zebra v4-via-v6 rta-via\n");
+#endif
+
 	if (!zebra_nhg_recursive_use_backups())
 		vty_out(vty, "no zebra nexthop resolve-via-backup\n");
 
@@ -4261,6 +4279,9 @@ void zebra_vty_init(void)
 	install_element(CONFIG_NODE, &no_zebra_packet_process_cmd);
 	install_element(CONFIG_NODE, &nexthop_group_use_enable_cmd);
 	install_element(CONFIG_NODE, &proto_nexthop_group_only_cmd);
+#ifdef HAVE_NETLINK
+	install_element(CONFIG_NODE, &zebra_v4_via_v6_rta_via_cmd);
+#endif
 	install_element(CONFIG_NODE, &backup_nexthop_recursive_use_enable_cmd);
 
 	install_element(VIEW_NODE, &show_nexthop_group_cmd);
