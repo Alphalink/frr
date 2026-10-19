@@ -139,11 +139,14 @@ static bool add_v4_over_v6_rta_via_attr(struct nlmsghdr *nlmsg, size_t req_size,
 			   addr_num_bytes + sizeof(gw_fam.family));
 }
 
-/* Helper to control use of kernel-level nexthop ids */
+/*
+ * Helper to control use of kernel-level nexthop ids. With netns VRFs the ids
+ * are per namespace: each nhe carries the vrf_id of its namespace (see
+ * zebra_nhe_init()) and is installed through that namespace's socket.
+ */
 static bool kernel_nexthops_supported(void)
 {
-	return (supports_nh && !vrf_is_backend_netns()
-		&& zebra_nhg_kernel_nexthops_enabled());
+	return (supports_nh && zebra_nhg_kernel_nexthops_enabled());
 }
 
 /*
@@ -3573,10 +3576,11 @@ static struct nexthop netlink_nexthop_process_nh(struct rtattr **tb,
 	else {
 		flog_warn(
 			EC_ZEBRA_UNKNOWN_INTERFACE,
-			"%s: Unknown nexthop interface %u received, defaulting to VRF_DEFAULT",
-			__func__, nh.ifindex);
+			"%s: Unknown nexthop interface %u received, defaulting to VRF %u",
+			__func__, nh.ifindex, ns_id);
 
-		nh.vrf_id = VRF_DEFAULT;
+		/* VRF_DEFAULT unless vrfs are network namespaces */
+		nh.vrf_id = ns_id;
 	}
 
 	if (tb[NHA_ENCAP] && tb[NHA_ENCAP_TYPE]) {
@@ -3759,6 +3763,8 @@ int netlink_nexthop_change(struct nlmsghdr *h, ns_id_t ns_id, int startup, void 
 				 */
 				nh.type = NEXTHOP_TYPE_BLACKHOLE;
 				nh.bh_type = BLACKHOLE_UNSPEC;
+				/* namespace of the notification */
+				nh.vrf_id = vrf_id;
 			} else if (tb[NHA_OIF])
 				/**
 				 * This is a true new nexthop, so we need

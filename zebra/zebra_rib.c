@@ -2646,6 +2646,14 @@ static void process_subq_early_route_add(struct zebra_early_route *ere)
 	if (re->nhe_id > 0) {
 		nhe = zebra_nhg_lookup_id(re->nhe_id);
 
+		/*
+		 * Kernel ids are per netns, our table is not: the nhe of
+		 * another netns with this id is not the nexthop of this
+		 * route, see nhg_ctx_process_new().
+		 */
+		if (nhe && vrf_is_backend_netns() && nhe->vrf_id != re->vrf_id)
+			nhe = NULL;
+
 		if (!nhe) {
 			/*
 			 * We've received from the kernel a nexthop id
