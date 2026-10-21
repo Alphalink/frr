@@ -1302,6 +1302,16 @@ static int nhg_ctx_process_new(struct nhg_ctx *ctx)
 		zlog_debug("%s: id %u, count %d, lookup => %p",
 			   __func__, id, count, lookup);
 
+	if (lookup && vrf_is_backend_netns() && lookup->vrf_id != vrf_id) {
+		/* Kernel ids are per netns, our table is not: this event is
+		 * for another namespace that reuses the id of our nhe.
+		 */
+		if (IS_ZEBRA_DEBUG_NHG_DETAIL)
+			zlog_debug("%s: id %u: event from vrf %u, nhe is vrf %u, ignored",
+				   __func__, id, vrf_id, lookup->vrf_id);
+		return 0;
+	}
+
 	if (lookup) {
 		/* This is already present in our table, hence an update
 		 * that we did not initiate.
@@ -1383,6 +1393,14 @@ static int nhg_ctx_process_del(struct nhg_ctx *ctx)
 			"Kernel delete message received for nexthop group ID (%u) that we do not have in our ID table",
 			id);
 		return -1;
+	}
+
+	if (vrf_is_backend_netns() && nhe->vrf_id != nhg_ctx_get_vrf_id(ctx)) {
+		if (IS_ZEBRA_DEBUG_NHG_DETAIL)
+			zlog_debug("%s: id %u: event from vrf %u, nhe is vrf %u, ignored",
+				   __func__, id, nhg_ctx_get_vrf_id(ctx),
+				   nhe->vrf_id);
+		return 0;
 	}
 
 	zebra_nhg_handle_kernel_state_change(nhe, true);
