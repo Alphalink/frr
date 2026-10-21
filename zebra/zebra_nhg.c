@@ -740,6 +740,24 @@ static void handle_recursive_depend(struct nhg_connected_tree_head *nhg_depends,
 }
 
 /*
+ * Ifindex and blackhole nexthop objects are address family specific. A group
+ * holding one of them must be too, otherwise a v4 route and a v6 route with
+ * the same interfaces share one group whose members are of the wrong family
+ * for one of them.
+ */
+static bool zebra_nhg_has_af_specific_member(const struct nexthop_group *nhg)
+{
+	const struct nexthop *nh;
+
+	for (nh = nhg->nexthop; nh; nh = nh->next)
+		if (nh->type == NEXTHOP_TYPE_IFINDEX
+		    || nh->type == NEXTHOP_TYPE_BLACKHOLE)
+			return true;
+
+	return false;
+}
+
+/*
  * Lookup an nhe in the global hash, using data from another nhe. If 'lookup'
  * has an id value, that's used. Create a new global/shared nhe if not found.
  */
@@ -762,6 +780,11 @@ static bool zebra_nhe_find(struct nhg_hash_entry **nhe, /* return value */
 	    zrouter.nhg_resilience.buckets && lookup->nhg.nhgr.buckets == 0 &&
 	    (nhg_depends || (lookup->nhg.nexthop && lookup->nhg.nexthop->next)))
 		lookup->nhg.nhgr = zrouter.nhg_resilience;
+
+	if (!nhg_depends && lookup->afi == AFI_UNSPEC && lookup->nhg.nexthop
+	    && lookup->nhg.nexthop->next
+	    && zebra_nhg_has_af_specific_member(&lookup->nhg))
+		lookup->afi = afi;
 
 	if (lookup->id)
 		(*nhe) = zebra_nhg_lookup_id(lookup->id);
