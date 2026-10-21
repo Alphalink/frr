@@ -43,6 +43,13 @@ NEIGH_PER_VRF = [
 # nexthop groups are installed in the namespace of the VRF
 STATIC_PREFIX = "192.168.0.0/24"
 
+# ECMP static routes (same prefixes in each VRF) over two interface-only
+# nexthops, the VRF interface and a dummy. A v4 and a v6 route with the same
+# nexthops must get two different kernel nexthop groups.
+DUMMY_IFNAME = "r1-dum"
+ECMP_PREFIX_V4 = "192.168.1.0/24"
+ECMP_PREFIX_V6 = "2001:db8:1::/64"
+
 # New neighbors added at test time to verify runtime receipt (10.0.0.3 in each VRF)
 NEIGH_NEW_PER_VRF = [
     {"ip": "10.0.0.3", "mac": "aa:bb:cc:dd:ee:12", "ifname": "r1-eth0"},
@@ -78,6 +85,10 @@ def setup_module(mod):
         r1.net.add_netns(vrf)
         ifname = "r1-eth{}".format(i)
         r1.net.set_intf_netns(ifname, vrf, up=True)
+        r1.run(
+            "ip netns exec {0} ip link add {1} type dummy && "
+            "ip netns exec {0} ip link set {1} up".format(vrf, DUMMY_IFNAME)
+        )
 
     r1.use_netns_vrf()
     r1.load_frr_config(extra_daemons=["staticd"])
@@ -320,6 +331,76 @@ def test_kernel_nhg_per_vrf():
         )
         _, result = topotest.run_and_expect(test_func, None, count=15, wait=1)
         assert result is None, "Kernel nexthop group check failed: {}".format(result)
+
+
+def _route_nhg_id(r1, vrf, prefix, v6=False):
+    "Return the nexthop group id of an installed static route, None otherwise."
+    cmd = "show {} route vrf {} {} json".format("ipv6" if v6 else "ip", vrf, prefix)
+    out = r1.vtysh_cmd(cmd, isjson=True)
+    routes = out.get(prefix) or []
+    if not routes or not routes[0].get("installed"):
+        return None
+    return routes[0].get("nexthopGroupId")
+
+
+def _route_installed(r1, vrf, prefix, v6=False):
+    "Return None when the static route is installed, an error string otherwise."
+    if _route_nhg_id(r1, vrf, prefix, v6) is None:
+        return "route {} not installed in VRF {}".format(prefix, vrf)
+    return None
+
+
+def _check_ecmp_dev_only_route(r1, vrf, prefix, nhg_id, v6):
+    "Return None when the kernel route uses the group and has two nexthops."
+    family = "-6" if v6 else "-4"
+    out = r1.run("ip netns exec {} ip {} route show {}".format(vrf, family, prefix))
+    if "nhid {}".format(nhg_id) not in out:
+        return "route {} of {} does not use nhid {}: {}".format(
+            prefix, vrf, nhg_id, out
+        )
+    if out.count("nexthop dev") != 2:
+        return "route {} of {} is not ECMP over two interfaces: {}".format(
+            prefix, vrf, out
+        )
+    out = r1.run("ip netns exec {} ip nexthop show id {}".format(vrf, nhg_id))
+    if "group" not in out:
+        return "nexthop id {} of {} is not a group: {}".format(nhg_id, vrf, out)
+    return None
+
+
+def test_kernel_nhg_ecmp_dev_only_v4_v6():
+    "A v4 and a v6 ECMP route over interface-only nexthops use two groups."
+    tgen = get_topogen()
+    if tgen.routers_have_failure():
+        pytest.skip(tgen.errors)
+
+    r1 = tgen.gears["r1"]
+
+    for vrf in VRF_NAMES:
+        ids = {}
+        for v6, prefix in ((False, ECMP_PREFIX_V4), (True, ECMP_PREFIX_V6)):
+            test_func = partial(_route_installed, r1, vrf, prefix, v6)
+            _, result = topotest.run_and_expect(test_func, None, count=30, wait=1)
+            assert result is None, result
+            ids[prefix] = _route_nhg_id(r1, vrf, prefix, v6)
+
+        # Interface-only nexthop objects are address family specific in the
+        # kernel: the two routes cannot share a group, or the v6 route is
+        # refused ("IPv6 routes can not use an IPv4 nexthop").
+        assert ids[ECMP_PREFIX_V4] != ids[ECMP_PREFIX_V6], (
+            "v4 and v6 ECMP routes of VRF {} share nexthop group {}".format(
+                vrf, ids[ECMP_PREFIX_V4]
+            )
+        )
+
+        for v6, prefix in ((False, ECMP_PREFIX_V4), (True, ECMP_PREFIX_V6)):
+            test_func = partial(
+                _check_ecmp_dev_only_route, r1, vrf, prefix, ids[prefix], v6
+            )
+            _, result = topotest.run_and_expect(test_func, None, count=15, wait=1)
+            assert result is None, "Kernel ECMP route check failed: {}".format(
+                result
+            )
 
 
 if __name__ == "__main__":
