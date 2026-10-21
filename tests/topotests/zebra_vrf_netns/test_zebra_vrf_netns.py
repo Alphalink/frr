@@ -15,6 +15,7 @@ and interface naming across VRFs.
 """
 
 import os
+import re
 import sys
 import pytest
 
@@ -401,6 +402,60 @@ def test_kernel_nhg_ecmp_dev_only_v4_v6():
             assert result is None, "Kernel ECMP route check failed: {}".format(
                 result
             )
+
+
+def _check_nhg_untouched(r1, vrf, nhg_id):
+    "Return None when the group is still installed in its VRF for its route."
+    nhg = r1.vtysh_cmd("show nexthop-group rib {} json".format(nhg_id), isjson=True)
+    entry = nhg.get(str(nhg_id)) or {}
+    if entry.get("vrf") != vrf or not entry.get("installed"):
+        return "nexthop group {} not installed in {}: {}".format(nhg_id, vrf, entry)
+    if _route_nhg_id(r1, vrf, STATIC_PREFIX) != nhg_id:
+        return "route {} of {} no longer uses nhid {}".format(
+            STATIC_PREFIX, vrf, nhg_id
+        )
+    if not _kernel_nhg_in_netns(r1, vrf, nhg_id):
+        return "nexthop id {} is gone from the {} namespace".format(nhg_id, vrf)
+    return None
+
+
+def test_kernel_nhg_foreign_netns_id_reuse():
+    "A kernel nexthop with the id of our group, in another netns, is ignored."
+    tgen = get_topogen()
+    if tgen.routers_have_failure():
+        pytest.skip(tgen.errors)
+
+    r1 = tgen.gears["r1"]
+    owner, other, other_ifname = VRF_NAMES[0], VRF_NAMES[1], "r1-eth1"
+
+    nhg_id = _route_nhg_id(r1, owner, STATIC_PREFIX)
+    assert nhg_id, "Static route of VRF {} not installed".format(owner)
+    assert not _kernel_nhg_in_netns(r1, other, nhg_id), (
+        "nexthop id {} already exists in {}".format(nhg_id, other)
+    )
+
+    # Kernel nexthop ids are per namespace: another namespace is free to use
+    # the id of our group. Zebra must not take these events for its own group.
+    r1.run(
+        "ip netns exec {} ip nexthop add id {} dev {}".format(
+            other, nhg_id, other_ifname
+        )
+    )
+    test_func = partial(_check_nhg_untouched, r1, owner, nhg_id)
+    _, result = topotest.run_and_expect(test_func, None, count=5, wait=3)
+    assert result is None, "Group changed after foreign add: {}".format(result)
+
+    r1.run("ip netns exec {} ip nexthop del id {}".format(other, nhg_id))
+    _, result = topotest.run_and_expect(test_func, None, count=5, wait=3)
+    assert result is None, "Group changed after foreign delete: {}".format(result)
+
+    log = r1.net.getLog("log", "zebra")
+    pattern = r"Kernel (updated|deleted) a nexthop group with ID \({}".format(nhg_id)
+    assert not re.search(pattern, log), (
+        "zebra reacted to the foreign nexthop id {}: {}".format(
+            nhg_id, re.search(pattern, log).group(0)
+        )
+    )
 
 
 if __name__ == "__main__":
