@@ -24,6 +24,46 @@ des statiques via une interface recréée : régression upstream, master et 10.8
   égales, la route la plus récente gagne au lieu de la plus ancienne. Un
   écart de métrique, même d'une unité, reste le moyen d'avoir un choix stable.
 
+## Branche `10.5.5-nhg-netns` : groupes de nexthop noyau avec le backend netns
+
+Trois commits de plus (ticket 72002) : `413c014ecf` lève le verrou de 2020 qui
+désactivait `zebra nexthop kernel enable` avec `--vrfwnetns` et fait porter la
+netns par chaque groupe ; `d03d1423fc` distingue les groupes v4 et v6 à membres
+« interface seule » ; `6ce1809985` ignore les événements noyau d'une autre netns
+qui réutilisent un identifiant. Effet : les routes ECMP v6 sur interfaces
+seules s'installent (le noyau refuse ces routes sans objet nexthop). La version
+pour upstream est la branche `zebra-nhg-netns`, sur master, avec topotests.
+
+### Condition de déploiement : un seul FRR écrit dans chaque netns vue par muli
+
+zebra en mode `--vrfwnetns` tient chaque netns de `/run/netns` pour la sienne.
+À son démarrage il lit les objets nexthop au protocole `zebra` et les routes aux
+protocoles FRR qui s'y trouvent, puis son balayage de démarrage efface du noyau
+tout ce qu'aucun client n'a réclamé. Mesuré sur maquette : si le RR de `mulirr`
+a des objets et des routes, chaque redémarrage de `frr@muli` les supprime et le
+RR ne remet pas ses routes (22 statiques « installées » dans sa RIB, 3 dans le
+noyau). Même résultat avec FRR master.
+
+En production la condition tient : le RR a `bgp no-rib`, aucune route statique
+et `no zebra nexthop kernel enable`, donc rien à lire. Pour qu'elle n'ait plus
+à tenir, cacher la netns au seul service `frr@muli`, sans toucher à FRR :
+
+    # /etc/systemd/system/frr@muli.service.d/hide-mulirr.conf
+    [Unit]
+    After=ifupdown-netns@muli.service ifupdown-netns@mulirr.service
+    Requires=ifupdown-netns@muli.service
+
+    [Service]
+    InaccessiblePaths=-/run/netns/mulirr
+
+Validé sur maquette : `show vrf` de muli sans `mulirr`, session BGP avec le RR
+intacte, redémarrage de muli sans aucune suppression chez le RR, netns créées
+plus tard toujours découvertes. Limite : si `mulirr` est détruite puis recréée
+pendant que `frr@muli` tourne, le nouveau montage se propage par-dessus le
+masque jusqu'au prochain redémarrage de `frr@muli`. Contrôle : `vtysh -N muli
+-c 'show vrf'` ne doit pas lister `mulirr`, `ip -n mulirr nexthop show` doit
+rester vide.
+
 ## Build rapide
 
 Sur un Debian 12 avec la source apt FRR 10.5
