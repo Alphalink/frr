@@ -12,6 +12,7 @@ extern "C" {
 #endif
 
 extern void zebra_ns_notify_init(void);
+extern void zebra_ns_notify_exclude(const char *name);
 extern void zebra_ns_notify_parse(void);
 extern void zebra_ns_notify_close(void);
 

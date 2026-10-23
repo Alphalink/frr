@@ -24,6 +24,7 @@
 #include "command.h"
 #include "memory.h"
 #include "lib_errors.h"
+#include "linklist.h"
 
 #include "zebra_router.h"
 #endif /* defined(HAVE_NETLINK) */
@@ -48,6 +49,11 @@
 
 DEFINE_MTYPE_STATIC(ZEBRA, NETNS_MISC, "ZebraNetNSInfo");
 static struct event *zebra_netns_notify_current;
+
+/* Network namespaces given with --netns-exclude: another routing process
+ * owns them, zebra must not turn them into VRFs.
+ */
+static struct list *zebra_ns_excluded;
 
 struct zebra_netns_info {
 	const char *netnspath;
@@ -197,6 +203,24 @@ static int zebra_ns_delete(char *name)
 
 	zlog_info("NS notify : deleted VRF %s", name);
 	return 0;
+}
+
+void zebra_ns_notify_exclude(const char *name)
+{
+	if (!zebra_ns_excluded)
+		zebra_ns_excluded = list_new();
+	listnode_add(zebra_ns_excluded, XSTRDUP(MTYPE_NETNS_MISC, name));
+}
+
+static bool zebra_ns_notify_is_excluded(const char *name)
+{
+	struct listnode *node;
+	const char *excluded;
+
+	for (ALL_LIST_ELEMENTS_RO(zebra_ns_excluded, node, excluded))
+		if (strmatch(excluded, name))
+			return true;
+	return false;
 }
 
 static int zebra_ns_notify_self_identify(struct stat *netst)
@@ -357,6 +381,12 @@ static void zebra_ns_notify_read(struct event *t)
 		memcpy(event_name, event->name, event->len);
 		event_name[event->len - 1] = 0;
 
+		if (zebra_ns_notify_is_excluded(event_name)) {
+			zlog_info("NS notify : NS %s excluded, ignored",
+				  event_name);
+			continue;
+		}
+
 		if (CHECK_FLAG(event->mask, IN_DELETE)) {
 			zebra_ns_delete(event_name);
 			continue;
@@ -399,6 +429,11 @@ void zebra_ns_notify_parse(void)
 		if (strcmp(dent->d_name, ".") == 0
 		    || strcmp(dent->d_name, "..") == 0)
 			continue;
+		if (zebra_ns_notify_is_excluded(dent->d_name)) {
+			zlog_info("NS parsing init: NS %s excluded, no VRF created",
+				  dent->d_name);
+			continue;
+		}
 		if (fstatat(srcdirfd, dent->d_name, &st, 0) < 0) {
 			flog_err_sys(
 				EC_LIB_SYSTEM_CALL,
@@ -448,8 +483,21 @@ void zebra_ns_notify_init(void)
 		       &zebra_netns_notify_current);
 }
 
+static void zebra_ns_notify_exclude_free(void)
+{
+	struct listnode *node, *nnode;
+	char *excluded;
+
+	for (ALL_LIST_ELEMENTS(zebra_ns_excluded, node, nnode, excluded))
+		XFREE(MTYPE_NETNS_MISC, excluded);
+	list_delete(&zebra_ns_excluded);
+}
+
 void zebra_ns_notify_close(void)
 {
+	if (zebra_ns_excluded)
+		zebra_ns_notify_exclude_free();
+
 	if (zebra_netns_notify_current == NULL)
 		return;
 
@@ -467,6 +515,10 @@ void zebra_ns_notify_close(void)
 }
 
 #else
+void zebra_ns_notify_exclude(const char *name)
+{
+}
+
 void zebra_ns_notify_parse(void)
 {
 }
