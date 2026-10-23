@@ -40,6 +40,10 @@ OPTIONS available for the |DAEMON| command:
 
    This option is deprecated. Please use the global -w option instead.
 
+.. option:: --netns-exclude <name>
+
+   With the namespace VRF backend, do not create a VRF for the network namespace *name*, at startup or later. Use it for a namespace owned by another routing process. Can be given several times.
+
 ROUTES
 ------
 

@@ -64,6 +64,16 @@ Besides the common invocation options (:ref:`common-invocation-options`), the
 
    .. seealso:: :ref:`zebra-vrf`, :ref:`common-invocation-options`
 
+.. option:: --netns-exclude <name>
+
+   With the network namespace VRF backend, do not create a VRF for the
+   network namespace *name*, neither at startup nor when it appears later.
+   Use it when another routing process, for instance another FRR instance
+   started with ``-N``, owns that namespace: otherwise *Zebra* reads the
+   routes and nexthop groups installed there as its own and its startup
+   sweep removes them from the kernel. The option can be given several
+   times, once per namespace.
+
 .. option:: -z <path_to_socket>, --socket <path_to_socket>
 
    If this option is supplied on the cli, the path to the zebra

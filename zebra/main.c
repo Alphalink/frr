@@ -80,6 +80,7 @@ uint32_t rt_table_main_id = RT_TABLE_MAIN;
 #define OPTION_ASIC_OFFLOAD    2001
 #define OPTION_V6_WITH_V4_NEXTHOP 2002
 #define OPTION_NEXTHOP_WEIGHT_16_BIT 2003
+#define OPTION_NETNS_EXCLUDE 2004
 
 /* Command line options. */
 const struct option longopts[] = {
@@ -95,6 +96,7 @@ const struct option longopts[] = {
 	{ "vrfwnetns", no_argument, NULL, 'n' },
 	{ "nl-bufsize", required_argument, NULL, 's' },
 	{ "v6-rr-semantics", no_argument, NULL, OPTION_V6_RR_SEMANTICS },
+	{ "netns-exclude", required_argument, NULL, OPTION_NETNS_EXCLUDE },
 #endif /* HAVE_NETLINK */
 	{ "routing-table", optional_argument, NULL, 'R' },
 	{ 0 }
@@ -414,6 +416,7 @@ int main(int argc, char **argv)
 		    "  -s, --nl-bufsize            Set netlink receive buffer size\n"
 		    "  -n, --vrfwnetns             Use NetNS as VRF backend (deprecated, use -w)\n"
 		    "      --v6-rr-semantics       Use v6 RR semantics\n"
+		    "      --netns-exclude NAME    Do not create a VRF for netns NAME (repeatable)\n"
 #else
 		    "  -s,                         Set kernel socket receive buffer size\n"
 #endif /* HAVE_NETLINK */
@@ -489,6 +492,13 @@ int main(int argc, char **argv)
 			break;
 		case OPTION_V6_WITH_V4_NEXTHOP:
 			v6_with_v4_nexthop = true;
+			break;
+		case OPTION_NETNS_EXCLUDE:
+			if (optarg[0] == '\0' || strchr(optarg, '/')) {
+				fprintf(stderr, "Invalid netns name: %s\n", optarg);
+				exit(1);
+			}
+			zebra_ns_notify_exclude(optarg);
 			break;
 #endif /* HAVE_NETLINK */
 		case OPTION_NEXTHOP_WEIGHT_16_BIT:
