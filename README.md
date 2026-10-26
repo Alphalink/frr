@@ -59,6 +59,39 @@ masque jusqu'au prochain redémarrage de `frr@muli`. Contrôle : `vtysh -N muli
 -c 'show vrf'` ne doit pas lister `mulirr`, `ip -n mulirr nexthop show` doit
 rester vide.
 
+## Branche `10.5.5-nhg-netns-exclude` : option zebra `--netns-exclude`
+
+Deux commits de plus sur `10.5.5-nhg-netns` : `d9802cfedb` ajoute l'option,
+`378f5b682c` son topotest. La version pour upstream est la branche
+`zebra-nhg-netns-exclude`, sur master.
+
+`--netns-exclude NOM` tient zebra à l'écart de la netns `NOM` quand il tourne
+avec `--vrfwnetns` : pas de VRF pour elle, ni au démarrage ni quand elle
+apparaît plus tard, et sa suppression est ignorée. Le test a lieu avant
+l'ouverture de la netns, zebra n'y lit donc rien et son balayage de démarrage
+n'y efface rien. L'option se répète, une fois par netns. Un nom vide ou qui
+contient `/` arrête zebra dès le lancement.
+
+Elle sert dans le cas de la condition ci-dessus : une netns qui appartient à
+un autre FRR. Sur un concentrateur, dans `/etc/frr/muli/daemons` :
+
+    zebra_options="  -A 127.0.0.1 -s 90000000 --vrfwnetns --netns-exclude mulirr"
+
+L'option remplace le drop-in `hide-mulirr` et lève sa limite : une `mulirr`
+détruite puis recréée pendant que `frr@muli` tourne reste ignorée. Les deux
+ensemble ne se gênent pas.
+
+Validé sur maquette avec le paquet `+alphalink6~rc6`. Sans l'option, un
+redémarrage de `frr@muli` fait passer le RR de 22 routes noyau à 0. Avec, rien
+ne bouge : ni au redémarrage, ni à la recréation de `mulirr`, ni quand `mulirr`
+est absente au démarrage de muli, ni avec les groupes de nexthop noyau activés
+sur muli, ni sur 20 redémarrages d'affilée. Pas de fuite : aucun type mémoire
+FRR restant à l'arrêt, et valgrind ne trouve ni octet perdu ni erreur liée à
+l'option. Contrôle : `vtysh -N muli -c 'show vrf'` ne liste pas `mulirr`. Les
+exclusions à chaud sont dans `/var/log/frr/muli.log` (`NS mulirr excluded`).
+Celle du démarrage n'y figure pas, car elle est journalisée avant l'ouverture
+du fichier.
+
 ## Build rapide
 
 Sur un Debian 12 avec la source apt FRR 10.5
