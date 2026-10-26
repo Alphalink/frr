@@ -10,8 +10,9 @@ test_zebra_netns_exclude.py: zebra --netns-exclude with the netns VRF backend.
 A namespace given with --netns-exclude belongs to another routing process.
 zebra must not turn it into a VRF, neither at startup nor when it appears
 later, and must leave the routes and nexthop groups installed there alone.
-Without the option, zebra reads them as its own (FRR protocols) and its
-startup sweep removes them from the kernel.
+Without the option, zebra takes the nexthop object installed there with the
+zebra protocol for its own and removes it from the kernel when it stops (on
+10.5, at its startup sweep already), which drops the route using it.
 """
 
 import os
@@ -24,6 +25,7 @@ sys.path.append(os.path.join(CWD, "../"))
 from lib import topotest
 from lib.topogen import Topogen, TopoRouter, get_topogen
 from lib.topolog import logger
+from lib.common_config import start_router_daemons
 from functools import partial
 
 MANAGED_VRF = "vrf-red"
@@ -67,7 +69,10 @@ def _install_foreign_content(router, netns):
 def _foreign_content(router, netns):
     "Return what is left of the foreign content in netns, as a set of labels."
     left = set()
-    cmd = "ip netns exec {} ip nexthop show id {}".format(netns, FOREIGN_NH_ID)
+    # router.run() joins stderr: an absent object must print nothing.
+    cmd = "ip netns exec {} ip nexthop show id {} 2>/dev/null".format(
+        netns, FOREIGN_NH_ID
+    )
     if router.run(cmd).strip():
         left.add("nexthop")
     for prefix in (FOREIGN_NHID_PREFIX, FOREIGN_PLAIN_PREFIX):
@@ -192,6 +197,33 @@ def test_other_netns_created_later():
     r1.run("ip netns del {}".format(LATE_MANAGED_NETNS))
     _, result = topotest.run_and_expect(test_func, False, count=10, wait=1)
     assert not result, "VRF {} not removed".format(LATE_MANAGED_NETNS)
+
+
+def test_excluded_netns_content_survives_zebra_shutdown():
+    "A clean zebra shutdown leaves the excluded namespace content in the kernel."
+    tgen = get_topogen()
+    if tgen.routers_have_failure():
+        pytest.skip(tgen.errors)
+
+    r1 = tgen.gears["r1"]
+    # SIGTERM, not the SIGKILL of kill_router_daemons(): only a clean
+    # shutdown runs the cleanup that removes zebra's nexthop objects.
+    pid = r1.run("cat /var/run/frr/zebra.pid").strip()
+    assert pid.isdigit(), "zebra pid not found: {}".format(pid)
+    r1.run("kill -TERM {}".format(pid))
+    test_func = lambda: r1.run("test -d /proc/{} && echo up".format(pid)).strip()
+    _, result = topotest.run_and_expect(test_func, "", count=30, wait=1)
+    assert result == "", "zebra did not stop"
+
+    expected = {"nexthop", FOREIGN_NHID_PREFIX, FOREIGN_PLAIN_PREFIX}
+    assert _foreign_content(r1, EXCLUDED_NETNS) == expected, "foreign content removed"
+
+    # The next tests need a running zebra, started with the same options.
+    start_router_daemons(tgen, "r1", ["zebra"])
+    test_func = lambda: MANAGED_VRF in _vrf_names(r1)
+    _, result = topotest.run_and_expect(test_func, True, count=30, wait=1)
+    assert result, "zebra did not come back"
+    assert _foreign_content(r1, EXCLUDED_NETNS) == expected, "foreign content removed"
 
 
 def test_memory_leak():
