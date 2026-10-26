@@ -32,12 +32,15 @@ pour upstream est la branche `zebra-nhg-netns`, sur master, avec topotests.
 ### Condition de déploiement : un seul FRR écrit dans chaque netns vue par muli
 
 zebra en mode `--vrfwnetns` tient chaque netns de `/run/netns` pour la sienne.
-À son démarrage il lit les objets nexthop au protocole `zebra` et les routes aux
-protocoles FRR qui s'y trouvent, puis son balayage de démarrage efface du noyau
-tout ce qu'aucun client n'a réclamé. Mesuré sur maquette : si le RR de `mulirr`
-a des objets et des routes, chaque redémarrage de `frr@muli` les supprime et le
-RR ne remet pas ses routes (22 statiques « installées » dans sa RIB, 3 dans le
-noyau). Même résultat avec FRR master.
+Il y lit les objets nexthop au protocole `zebra` et les prend à son compte. Or
+supprimer un objet nexthop emporte du noyau toutes les routes qui l'utilisent,
+et le RR remet ensuite ses objets, pas ses routes. Mesuré sur maquette : en
+10.5.5, le balayage de démarrage de muli supprime ces objets à chaque
+redémarrage de `frr@muli` (22 statiques « installées » dans la RIB du RR, 3
+dans le noyau). Sur FRR master, le balayage de démarrage attend la fin des
+lectures (commit `a1d86d4ccd`, FRR 10.7) et ne touche plus ces objets. Mais
+muli les supprime à son arrêt dès que `zebra nexthop kernel enable` est actif,
+et le RR tombe à 0 route dans le noyau.
 
 En production la condition tient : le RR a `bgp no-rib`, aucune route statique
 et `no zebra nexthop kernel enable`, donc rien à lire. Pour qu'elle n'ait plus
