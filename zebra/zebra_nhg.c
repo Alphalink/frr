@@ -354,25 +354,17 @@ zebra_nhg_connect_depends(struct nhg_hash_entry *nhe,
 	}
 }
 
-/*
- * An nhe only has a vrf when vrfs are network namespaces: the kernel nexthop
- * ids are then private to each namespace and the nhe has to be installed in
- * the namespace of its nexthops. Otherwise nhes are shared by all vrfs.
- */
-static vrf_id_t zebra_nhg_nexthop_vrf_id(const struct nexthop *nh)
-{
-	if (nh && vrf_is_backend_netns())
-		return nh->vrf_id;
-
-	return VRF_DEFAULT;
-}
-
 /* Init an nhe, for use in a hash lookup for example */
 void zebra_nhe_init(struct nhg_hash_entry *nhe, afi_t afi,
 		    const struct nexthop *nh)
 {
 	memset(nhe, 0, sizeof(struct nhg_hash_entry));
-	nhe->vrf_id = zebra_nhg_nexthop_vrf_id(nh);
+	/*
+	 * An nhe only has a vrf when vrfs are network namespaces: the kernel
+	 * nexthop ids are then private to each namespace and the nhe has to be
+	 * installed in the namespace of its nexthops.
+	 */
+	nhe->vrf_id = (!nh || !vrf_is_backend_netns()) ? VRF_DEFAULT : nh->vrf_id;
 	nhe->type = ZEBRA_ROUTE_NHG;
 	nhe->afi = AFI_UNSPEC;
 
@@ -968,7 +960,7 @@ static struct nhg_hash_entry *zebra_nhg_find_nexthop(uint32_t id,
 {
 	struct nhg_hash_entry *nhe = NULL;
 	struct nexthop_group nhg = {};
-	vrf_id_t vrf_id = zebra_nhg_nexthop_vrf_id(nh);
+	vrf_id_t vrf_id = !vrf_is_backend_netns() ? VRF_DEFAULT : nh->vrf_id;
 
 	nexthop_group_add_sorted(&nhg, nh);
 
@@ -1669,7 +1661,7 @@ struct nhg_hash_entry *zebra_nhg_rib_find(uint32_t id,
 	 * Make it happy but this is ridonc
 	 */
 	assert(nhg->nexthop);
-	vrf_id = zebra_nhg_nexthop_vrf_id(nhg->nexthop);
+	vrf_id = !vrf_is_backend_netns() ? VRF_DEFAULT : nhg->nexthop->vrf_id;
 
 	zebra_nhg_find(&nhe, id, nhg, NULL, vrf_id, rt_afi, type, false);
 
