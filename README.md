@@ -1,16 +1,21 @@
 # FRR 10.5.5 Alphalink
 
-Branche `10.5.5-alphalink` : FRR 10.5.5 officiel plus quatre changements,
+Branche `10.5.5-alphalink2` : FRR 10.5.5 officiel plus quatre changements,
 livrés dans le paquet Debian `bookworm-lisos`. Le README d'origine de FRR
 suit plus bas.
+
+Elle remplace `10.5.5-alphalink`, dont elle retire trois commits staticd non
+nécessaires à la métrique (`f97435db48`, `f6f6f318c6`, `09f028eb40`).
+`f6f6f318c6` (PR 23059) laisse non installées, après une rafale de sessions,
+des statiques via une interface recréée : régression upstream, master et 10.8.
 
 ## Ce que la branche ajoute à FRR 10.5.5
 
 - **Correctifs officiels** (18 commits) : les correctifs publiés par FRR sur
   `stable/10.5` après la 10.5.5, dont le plantage de bgpd sur
   `show bgp l2vpn evpn route vni all json`. Ils seront dans la future 10.5.6.
-- **Métrique des routes statiques** (12 commits, FRR 10.7, PR 21296 et
-  suites) : `ip route P NH metric M`. zebra choisit entre des chemins de même
+- **Métrique des routes statiques** (9 commits, FRR 10.7, PR 21296) :
+  `ip route P NH metric M`. zebra choisit entre des chemins de même
   distance selon leur métrique, par exemple une statique de secours derrière BGP.
 - **IPv4 via voisin IPv6** (`11267be4d2`, FRR 10.6) : une route IPv4 dont le
   voisin est IPv6 (BGP par interface, statique via `fe80::`) est installée
@@ -25,7 +30,7 @@ Sur un Debian 12 avec la source apt FRR 10.5
 (`deb-src [signed-by=/usr/share/keyrings/frrouting.gpg] https://deb.frrouting.org/frr bookworm frr-10.5`)
 et les dépendances de build installées (`sudo mk-build-deps -r -i debian/control`) :
 
-    git switch 10.5.5-alphalink
+    git switch 10.5.5-alphalink2
     git fetch https://github.com/FRRouting/frr tag frr-10.5.5
     export DEBFULLNAME="Prénom Nom" DEBEMAIL="prenom.nom@alphalink.fr"
     alphalink/build-deb.sh --rev 4            # 10.5.5-0~deb12u1+alphalink4
