@@ -67,6 +67,10 @@ static void if_zebra_speed_update(struct event *event)
 {
 	struct interface *ifp = EVENT_ARG(event);
 
+	/* PPP links have no ethtool speed; the query only waits on rtnl_lock */
+	if (ifp->ll_type == ZEBRA_LLT_PPP)
+		return;
+
 	dplane_intf_speed_get(ifp);
 }
 
@@ -1043,7 +1047,8 @@ void if_up(struct interface *ifp, bool install_connected)
 		zebra_evpn_mh_uplink_oper_update(zif);
 
 	event_cancel(&zif->speed_update);
-	dplane_intf_speed_get(ifp);
+	if (ifp->ll_type != ZEBRA_LLT_PPP)
+		dplane_intf_speed_get(ifp);
 
 	if_addr_wakeup(ifp);
 
@@ -2139,7 +2144,8 @@ static void zebra_if_dplane_ifp_handling(struct zebra_dplane_ctx *ctx)
 			if (!speed_set) {
 				speed = 0;
 				/* Query initial speed if not provided by dplane */
-				dplane_intf_speed_get(ifp);
+				if (dplane_ctx_get_ifp_zltype(ctx) != ZEBRA_LLT_PPP)
+					dplane_intf_speed_get(ifp);
 
 				/*
 				 * Some platforms are telling us that the interface is
