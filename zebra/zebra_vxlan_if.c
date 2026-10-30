@@ -160,6 +160,18 @@ static int zebra_vxlan_if_del_vni(struct interface *ifp,
 			zlog_debug("Del L3-VNI %u intf %s(%u)", vni, ifp->name,
 				   ifp->ifindex);
 
+		/*
+		 * A vxlan moved to another netns is seen twice for a while,
+		 * and the events of the two netns come in any order: the VNI
+		 * belongs to the interface added last, ignore the other one.
+		 */
+		if (zl3vni->vxlan_if != ifp) {
+			if (IS_ZEBRA_DEBUG_VXLAN)
+				zlog_debug("L3-VNI %u not bound to intf %s(%u) at del", vni,
+					   ifp->name, ifp->ifindex);
+			return 0;
+		}
+
 		/* process oper-down for l3-vni */
 		zebra_vxlan_process_l3vni_oper_down(zl3vni);
 
@@ -182,6 +194,14 @@ static int zebra_vxlan_if_del_vni(struct interface *ifp,
 			zlog_debug(
 				"Failed to locate VNI hash at del, IF %s(%u) VNI %u",
 				ifp->name, ifp->ifindex, vni);
+			return 0;
+		}
+
+		/* Not the interface the VNI is bound to, see the L3-VNI case */
+		if (zevpn->vxlan_if != ifp) {
+			if (IS_ZEBRA_DEBUG_VXLAN)
+				zlog_debug("L2-VNI %u not bound to intf %s(%u) at del", vni,
+					   ifp->name, ifp->ifindex);
 			return 0;
 		}
 
@@ -922,6 +942,14 @@ int zebra_vxlan_if_vni_down(struct interface *ifp, struct zebra_vxlan_vni *vnip)
 			zlog_debug("Intf %s(%u) L3-VNI %u is DOWN", ifp->name,
 				   ifp->ifindex, vni);
 
+		/* Not the interface the VNI is bound to, see if_del_vni() */
+		if (zl3vni->vxlan_if != ifp) {
+			if (IS_ZEBRA_DEBUG_VXLAN)
+				zlog_debug("L3-VNI %u not bound to intf %s(%u) at DOWN", vni,
+					   ifp->name, ifp->ifindex);
+			return 0;
+		}
+
 		zebra_vxlan_process_l3vni_oper_down(zl3vni);
 	} else {
 		/* process if-down for l2-vni */
@@ -938,7 +966,13 @@ int zebra_vxlan_if_vni_down(struct interface *ifp, struct zebra_vxlan_vni *vnip)
 			return -1;
 		}
 
-		assert(zevpn->vxlan_if == ifp);
+		/* Not the interface the VNI is bound to, see if_del_vni() */
+		if (zevpn->vxlan_if != ifp) {
+			if (IS_ZEBRA_DEBUG_VXLAN)
+				zlog_debug("L2-VNI %u not bound to intf %s(%u) at DOWN", vni,
+					   ifp->name, ifp->ifindex);
+			return 0;
+		}
 
 		/* remove from l3-vni list */
 		zl3vni = zl3vni_from_vrf(zevpn->vrf_id);
@@ -1036,7 +1070,14 @@ int zebra_vxlan_if_vni_up(struct interface *ifp, struct zebra_vxlan_vni *vnip)
 			return -1;
 		}
 
-		assert(zevpn->vxlan_if == ifp);
+		/* Not the interface the VNI is bound to, see if_del_vni() */
+		if (zevpn->vxlan_if != ifp) {
+			if (IS_ZEBRA_DEBUG_VXLAN)
+				zlog_debug("L2-VNI %u not bound to intf %s(%u) at UP", vni,
+					   ifp->name, ifp->ifindex);
+			return 0;
+		}
+
 		zebra_evpn_vl_vxl_ref(vnip->access_vlan, vnip->vni, zif);
 		vlan_if = zvni_map_to_svi(vnip->access_vlan,
 					  zif->brslave_info.br_if);
