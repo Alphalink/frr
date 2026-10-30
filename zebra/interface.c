@@ -1108,7 +1108,7 @@ void if_down(struct interface *ifp)
 
 	if_handle_bond_speed_change(ifp);
 
-	rib_update_handle_vrf_all(RIB_UPDATE_INTERFACE_DOWN, ZEBRA_ROUTE_KERNEL);
+	rib_update_kernel_routes_ifdown(ifp);
 }
 
 void if_refresh(struct interface *ifp)
@@ -1400,7 +1400,7 @@ static void zebra_if_addr_update_ctx(struct zebra_dplane_ctx *ctx,
 	 */
 	if (op != DPLANE_OP_INTF_ADDR_ADD && addr->family == AF_INET &&
 	    !if_has_connected_with_family(ifp, AF_INET))
-		rib_update(RIB_UPDATE_KERNEL_LAST_IPV4_ADDRESS_DELETED);
+		rib_update_kernel_routes_ifdown(ifp);
 }
 
 static void zebra_if_update_ctx(struct zebra_dplane_ctx *ctx,

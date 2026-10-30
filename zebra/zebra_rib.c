@@ -4824,6 +4824,44 @@ void rib_update_handle_vrf_all(enum rib_update_event event, int rtype)
 		rib_update_table(zrt->table, event, rtype);
 }
 
+/*
+ * The kernel flushes, without notification, the IPv4 routes of an
+ * interface that goes down. Purge from the RIB only the kernel routes whose
+ * nexthops all use this interface: a newer route for the same prefix on
+ * another interface (PPP session reconnected meanwhile, its link event
+ * still queued) must not be judged by the state of that other interface.
+ */
+void rib_update_kernel_routes_ifdown(const struct interface *ifp)
+{
+	struct zebra_router_table *zrt;
+	struct route_node *rn;
+	struct route_entry *re, *next;
+	struct nexthop *nexthop;
+	bool on_ifp;
+
+	RB_FOREACH (zrt, zebra_router_table_head, &zrouter.tables) {
+		for (rn = route_top(zrt->table); rn;
+		     rn = srcdest_route_next(rn)) {
+			RNODE_FOREACH_RE_SAFE (rn, re, next) {
+				if (re->type != ZEBRA_ROUTE_KERNEL)
+					continue;
+
+				on_ifp = true;
+				for (ALL_NEXTHOPS(re->nhe->nhg, nexthop)) {
+					if (nexthop->ifindex != ifp->ifindex ||
+					    nexthop->vrf_id != ifp->vrf->vrf_id) {
+						on_ifp = false;
+						break;
+					}
+				}
+				if (on_ifp)
+					rib_update_handle_kernel_route_down_possibility(rn,
+											re);
+			}
+		}
+	}
+}
+
 struct rib_update_ctx {
 	enum rib_update_event event;
 	vrf_id_t vrf_id;
