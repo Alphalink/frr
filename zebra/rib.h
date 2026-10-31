@@ -495,6 +495,7 @@ extern void zebra_rib_evaluate_rn_nexthops(struct route_node *rn, uint32_t seq,
 					   bool rt_delete);
 
 extern void rib_update_handle_vrf_all(enum rib_update_event event, int rtype);
+extern void rib_update_kernel_routes_ifdown(const struct interface *ifp);
 int zebra_show_metaq_counter(struct vty *vty, bool uj);
 
 /*
