@@ -114,6 +114,13 @@ static int zebra_vxlan_if_del_vni(struct interface *ifp,
 			zlog_debug("Del L3-VNI %u intf %s(%u)", vni, ifp->name,
 				   ifp->ifindex);
 
+		/*
+		 * A vxlan moved to another netns is seen twice for a while:
+		 * the VNI belongs to the last one added, ignore the other.
+		 */
+		if (zl3vni->vxlan_if && zl3vni->vxlan_if != ifp)
+			return 0;
+
 		/* process oper-down for l3-vni */
 		zebra_vxlan_process_l3vni_oper_down(zl3vni);
 
@@ -138,6 +145,10 @@ static int zebra_vxlan_if_del_vni(struct interface *ifp,
 				ifp->name, ifp->ifindex, vni);
 			return 0;
 		}
+
+		/* Not the interface that owns the VNI (moved to another netns) */
+		if (zevpn->vxlan_if && zevpn->vxlan_if != ifp)
+			return 0;
 
 		/* remove from l3-vni list */
 		zl3vni = zl3vni_from_vrf(zevpn->vrf_id);
@@ -889,6 +900,10 @@ int zebra_vxlan_if_vni_down(struct interface *ifp, struct zebra_vxlan_vni *vnip)
 			zlog_debug("Intf %s(%u) L3-VNI %u is DOWN", ifp->name,
 				   ifp->ifindex, vni);
 
+		/* Not the interface that owns the VNI (moved to another netns) */
+		if (zl3vni->vxlan_if && zl3vni->vxlan_if != ifp)
+			return 0;
+
 		zebra_vxlan_process_l3vni_oper_down(zl3vni);
 	} else {
 		/* process if-down for l2-vni */
@@ -905,7 +920,9 @@ int zebra_vxlan_if_vni_down(struct interface *ifp, struct zebra_vxlan_vni *vnip)
 			return -1;
 		}
 
-		assert(zevpn->vxlan_if == ifp);
+		/* Not the interface that owns the VNI (moved to another netns) */
+		if (zevpn->vxlan_if != ifp)
+			return 0;
 
 		/* remove from l3-vni list */
 		zl3vni = zl3vni_from_vrf(zevpn->vrf_id);
@@ -1003,7 +1020,9 @@ int zebra_vxlan_if_vni_up(struct interface *ifp, struct zebra_vxlan_vni *vnip)
 			return -1;
 		}
 
-		assert(zevpn->vxlan_if == ifp);
+		/* Not the interface that owns the VNI (moved to another netns) */
+		if (zevpn->vxlan_if != ifp)
+			return 0;
 		zebra_evpn_vl_vxl_ref(vnip->access_vlan, vnip->vni, zif);
 		vlan_if = zvni_map_to_svi(vnip->access_vlan,
 					  zif->brslave_info.br_if);
