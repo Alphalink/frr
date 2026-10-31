@@ -1681,6 +1681,50 @@ static int netlink_request_tunneldump(struct zebra_ns *zns, int family,
 	return netlink_request(&zns->netlink_cmd, &req);
 }
 
+/* Filter for netlink_link_flags_read(): keep the flags of the link */
+static int netlink_link_flags_filter(struct nlmsghdr *h, ns_id_t ns_id, int startup, void *arg)
+{
+	struct ifinfomsg *ifi = NLMSG_DATA(h);
+	uint64_t *flags = arg;
+
+	if (h->nlmsg_type == RTM_NEWLINK)
+		*flags = ifi->ifi_flags & 0x0000fffff;
+
+	return 0;
+}
+
+/*
+ * Read the current flags of one link. A link event can be older than the
+ * state zebra already has: the events queued while a new netns is read are
+ * handled after that read.
+ */
+int netlink_link_flags_read(struct zebra_ns *zns, ifindex_t ifindex, uint64_t *flags)
+{
+	struct zebra_dplane_info dp_info;
+	struct {
+		struct nlmsghdr n;
+		struct ifinfomsg ifm;
+		char buf[256];
+	} req;
+	int ret;
+
+	memset(&req, 0, sizeof(req));
+	req.n.nlmsg_len = NLMSG_LENGTH(sizeof(struct ifinfomsg));
+	req.n.nlmsg_type = RTM_GETLINK;
+	req.n.nlmsg_flags = NLM_F_REQUEST;
+	req.ifm.ifi_family = AF_UNSPEC;
+	req.ifm.ifi_index = ifindex;
+
+	ret = netlink_request(&zns->netlink_cmd, &req);
+	if (ret < 0)
+		return ret;
+
+	zebra_dplane_info_from_zns(&dp_info, zns, true /*is_cmd*/);
+
+	return netlink_parse_info(netlink_link_flags_filter, &zns->netlink_cmd, &dp_info, 1, false,
+				  flags, NULL);
+}
+
 /* Prototype for tunneldump walker */
 static int tunneldump_walk_cb(struct interface *ifp, void *arg);
 

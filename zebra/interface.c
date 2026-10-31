@@ -2098,6 +2098,19 @@ static void zebra_if_dplane_ifp_handling(struct zebra_dplane_ctx *ctx)
 		rc_bitfield = dplane_ctx_get_ifp_rc_bitfield(ctx);
 		startup = dplane_ctx_get_startup(ctx);
 		desc = dplane_ctx_get_ifp_desc(ctx);
+
+#ifdef HAVE_NETLINK
+		/*
+		 * The events of a new netns are handled after its interfaces
+		 * are read, so an event can carry an older state than zebra
+		 * has. A stale "down" on a vxlan or a bridge leaves its L3-VNI
+		 * down for good: check the current flags before acting on it.
+		 */
+		if (!startup && ifp && if_is_operative(ifp) &&
+		    (zif_type == ZEBRA_IF_VXLAN || zif_type == ZEBRA_IF_BRIDGE) &&
+		    !CHECK_FLAG(flags, IFF_RUNNING))
+			netlink_link_flags_read(zns, ifindex, &flags);
+#endif
 		family = dplane_ctx_get_ifp_family(ctx);
 		change_flags = dplane_ctx_get_ifp_change_flags(ctx);
 		cchanges = dplane_ctx_get_intf_carrier_changes(ctx);
