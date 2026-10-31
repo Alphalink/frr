@@ -68,6 +68,10 @@ static void if_zebra_speed_update(struct event *thread)
 	bool changed = false;
 	int error = 0;
 
+	/* PPP links have no ethtool speed; the ioctl only waits on rtnl_lock */
+	if (ifp->ll_type == ZEBRA_LLT_PPP)
+		return;
+
 	new_speed = kernel_get_speed(ifp, &error);
 
 	/* error may indicate vrf not available or
@@ -2013,7 +2017,9 @@ static void zebra_if_dplane_ifp_handling(struct zebra_dplane_ctx *ctx)
 			if_update_state_mtu(ifp, mtu);
 			if_update_state_mtu6(ifp, mtu);
 			if_update_state_metric(ifp, 0);
-			if_update_state_speed(ifp, kernel_get_speed(ifp, NULL));
+			if (dplane_ctx_get_ifp_zltype(ctx) != ZEBRA_LLT_PPP)
+				if_update_state_speed(ifp,
+						      kernel_get_speed(ifp, NULL));
 			ifp->ptm_status = ZEBRA_PTM_STATUS_UNKNOWN;
 			ifp->txqlen = dplane_ctx_get_intf_txqlen(ctx);
 
