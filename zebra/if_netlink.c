@@ -1694,9 +1694,9 @@ static int netlink_link_flags_filter(struct nlmsghdr *h, ns_id_t ns_id, int star
 }
 
 /*
- * Read the current flags of one link. A link event can be older than the
- * state zebra already has: the events queued while a new netns is read are
- * handled after that read.
+ * Read the current flags of one link. A link message can be older than the
+ * state zebra already has: the dump and the events of a new netns are
+ * handled in no fixed order.
  */
 int netlink_link_flags_read(struct zebra_ns *zns, ifindex_t ifindex, uint64_t *flags)
 {

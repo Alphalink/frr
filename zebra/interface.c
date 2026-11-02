@@ -2101,12 +2101,12 @@ static void zebra_if_dplane_ifp_handling(struct zebra_dplane_ctx *ctx)
 
 #ifdef HAVE_NETLINK
 		/*
-		 * The events of a new netns are handled after its interfaces
-		 * are read, so an event can carry an older state than zebra
-		 * has. A stale "down" on a vxlan or a bridge leaves its L3-VNI
-		 * down for good: check the current flags before acting on it.
+		 * The dump and the events of a new netns reach us in no fixed
+		 * order, so either can carry an older state than zebra has. A
+		 * stale "down" on a vxlan or a bridge leaves its L3-VNI down
+		 * for good: check the current flags before acting on it.
 		 */
-		if (!startup && ifp && if_is_operative(ifp) &&
+		if (ifp && if_is_operative(ifp) &&
 		    (zif_type == ZEBRA_IF_VXLAN || zif_type == ZEBRA_IF_BRIDGE) &&
 		    !CHECK_FLAG(flags, IFF_RUNNING))
 			netlink_link_flags_read(zns, ifindex, &flags);
