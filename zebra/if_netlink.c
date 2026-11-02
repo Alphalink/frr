@@ -849,30 +849,59 @@ netlink_put_gre_set_msg(struct nl_batch *bth, struct zebra_dplane_ctx *ctx)
 	return ret;
 }
 
-/* Interface lookup by netlink socket. */
+/*
+ * Filter for interface_lookup_netlink(): the replies to our link dump are
+ * read as at startup, and the events received meanwhile are dispatched as
+ * the dplane pthread does, which ignores their errors: a bad event must not
+ * end the dump.
+ */
+static int netlink_link_dump_filter(struct nlmsghdr *h, ns_id_t ns_id, int startup, void *arg)
+{
+	const struct nlsock *nl = arg;
+
+	if (h->nlmsg_pid == nl->snl.nl_pid && h->nlmsg_seq == nl->seq)
+		return netlink_link_change(h, ns_id, true, NULL);
+
+	dplane_netlink_information_fetch(h, ns_id, false, NULL);
+	return 0;
+}
+
+/*
+ * Interface lookup by netlink socket.
+ *
+ * The links are dumped on the socket that receives the events of the
+ * netns, before the dplane pthread starts reading it (see
+ * zebra_ns_enable()). The dump replies and the events then come in one
+ * stream, in the order the kernel produced them, and zebra handles them
+ * in that order. Read on another socket, a dump reply could be handled
+ * after a newer event, or an event after a newer dump reply, and leave a
+ * stale state: a vxlan or a bridge of a new netns seen down for good.
+ */
 int interface_lookup_netlink(struct zebra_ns *zns)
 {
 	int ret;
 	struct zebra_dplane_info dp_info;
-	struct nlsock *netlink_cmd = &zns->netlink_dplane_out;
+	struct nlsock *netlink_in = &zns->netlink_dplane_in;
 
 	/* Capture key info from ns struct */
 	zebra_dplane_info_from_zns(&dp_info, zns, true /*is_cmd*/);
 
 	/* Get interface information. */
-	ret = netlink_request_intf_addr(netlink_cmd, AF_PACKET, RTM_GETLINK, 0);
+	ret = netlink_request_intf_addr(netlink_in, AF_PACKET, RTM_GETLINK, 0);
 	if (ret < 0)
 		return ret;
-	ret = netlink_parse_info(netlink_link_change, netlink_cmd, &dp_info, 0, true, NULL, NULL);
+	ret = netlink_parse_info(netlink_link_dump_filter, netlink_in, &dp_info, 0, true,
+				 netlink_in, NULL);
 	if (ret < 0)
 		return ret;
 
 	/* Get interface information - for bridge interfaces. */
-	ret = netlink_request_intf_addr(netlink_cmd, AF_BRIDGE, RTM_GETLINK,
+	ret = netlink_request_intf_addr(netlink_in, AF_BRIDGE, RTM_GETLINK,
 					RTEXT_FILTER_BRVLAN);
 	if (ret < 0)
 		return ret;
-	ret = netlink_parse_info(netlink_link_change, netlink_cmd, &dp_info, 0, true, NULL, NULL);
+	ret = netlink_parse_info(netlink_link_dump_filter, netlink_in, &dp_info, 0, true,
+				 netlink_in, NULL);
 	if (ret < 0)
 		return ret;
 
