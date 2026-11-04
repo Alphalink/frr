@@ -30,6 +30,8 @@ struct nlsock {
 	int seq;
 	struct sockaddr_nl snl;
 	char name[64];
+	/* Namespace of the socket, set at socket creation */
+	ns_id_t ns_id;
 
 	uint8_t *buf;
 	size_t buflen;
