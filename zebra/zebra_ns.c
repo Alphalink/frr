@@ -348,8 +348,13 @@ int zebra_ns_enable(ns_id_t ns_id, void **info)
 	zns->ns_id = ns_id;
 
 	kernel_init(zns);
-	zebra_dplane_ns_enable(zns, true);
+	/*
+	 * Read the links before the dplane pthread reads the events of the
+	 * netns: both go through the same socket, see
+	 * interface_lookup_netlink().
+	 */
 	interface_list(zns);
+	zebra_dplane_ns_enable(zns, true);
 
 	return 0;
 }
