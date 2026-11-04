@@ -67,6 +67,8 @@ extern int netlink_talk(netlink_parse_filter_t filter, struct nlmsghdr *n, struc
 extern int ge_netlink_talk(netlink_parse_filter_t filter, struct nlmsghdr *n, struct zebra_ns *zns,
 			   bool startup, void *arg, int *nl_err);
 extern int netlink_request(struct nlsock *nl, void *req);
+extern int dplane_netlink_information_fetch(struct nlmsghdr *h, ns_id_t ns_id, int startup,
+					    void *arg);
 
 enum netlink_msg_status {
 	FRR_NETLINK_SUCCESS,

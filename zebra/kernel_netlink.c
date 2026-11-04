@@ -383,10 +383,10 @@ static int netlink_socket(struct nlsock *nl, unsigned long groups,
 
 /*
  * Dispatch an incoming netlink message; used by the dataplane pthread's
- * netlink event reader code.
+ * netlink event reader code, and by the read of the links of a new netns
+ * (interface_lookup_netlink()).
  */
-static int dplane_netlink_information_fetch(struct nlmsghdr *h, ns_id_t ns_id, int startup,
-					    void *arg)
+int dplane_netlink_information_fetch(struct nlmsghdr *h, ns_id_t ns_id, int startup, void *arg)
 {
 	/*
 	 * Dispatch the incoming messages that the dplane pthread handles
