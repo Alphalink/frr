@@ -179,6 +179,15 @@ pthread_mutex_t nlsock_mutex;
 #define NLSOCK_LOCK() pthread_mutex_lock(&nlsock_mutex)
 #define NLSOCK_UNLOCK() pthread_mutex_unlock(&nlsock_mutex)
 
+/*
+ * The dplane pthread reads and writes the sockets of a namespace while the
+ * main pthread may close them, when the namespace goes away. Closing them
+ * and using them are serialized by this lock: a socket is never closed while
+ * the dplane pthread is in a read or a batch of writes, and the dplane
+ * pthread checks that it is still open before using it.
+ */
+static pthread_mutex_t nl_dplane_mutex;
+
 size_t nl_batch_tx_bufsize;
 char *nl_batch_tx_buf;
 
@@ -375,6 +384,7 @@ static int netlink_socket(struct nlsock *nl, unsigned long groups,
 	nl->snl = snl;
 	nl->sock = sock;
 	nl->proto = nl_family;
+	nl->ns_id = ns_id;
 	nl->buflen = NL_RCV_PKT_BUF_SIZE;
 	nl->buf = XMALLOC(MTYPE_NL_BUF, nl->buflen);
 
@@ -454,9 +464,17 @@ static int dplane_netlink_information_fetch(struct nlmsghdr *h, ns_id_t ns_id, i
  */
 int kernel_dplane_read(struct zebra_dplane_info *info)
 {
-	struct nlsock *nl = kernel_netlink_nlsock_lookup(info->sock);
+	struct nlsock *nl;
 
-	netlink_parse_info(dplane_netlink_information_fetch, nl, info, 5, false, NULL, NULL);
+	pthread_mutex_lock(&nl_dplane_mutex);
+
+	/* The namespace may be gone, its socket closed or even reused */
+	nl = kernel_netlink_nlsock_lookup(info->sock);
+	if (nl && nl->ns_id == info->ns_id)
+		netlink_parse_info(dplane_netlink_information_fetch, nl, info, 5, false, NULL,
+				   NULL);
+
+	pthread_mutex_unlock(&nl_dplane_mutex);
 
 	return 0;
 }
@@ -1546,6 +1564,15 @@ static enum netlink_msg_status nl_put_msg(struct nl_batch *bth,
 	return FRR_NETLINK_ERROR;
 }
 
+/* Is the socket of the namespace of this context still open? */
+static bool kernel_dplane_ctx_sock_open(struct zebra_dplane_ctx *ctx)
+{
+	const struct zebra_dplane_info *info = dplane_ctx_get_ns(ctx);
+	struct nlsock *nl = kernel_netlink_nlsock_lookup(dplane_ctx_get_ns_sock(ctx));
+
+	return nl && nl->ns_id == info->ns_id;
+}
+
 void kernel_update_multi(struct dplane_ctx_list_head *ctx_list)
 {
 	struct nl_batch batch;
@@ -1555,6 +1582,8 @@ void kernel_update_multi(struct dplane_ctx_list_head *ctx_list)
 
 	dplane_ctx_q_init(&handled_list);
 	nl_batch_init(&batch, &handled_list);
+
+	pthread_mutex_lock(&nl_dplane_mutex);
 
 	while (true) {
 		ctx = dplane_ctx_dequeue(ctx_list);
@@ -1579,6 +1608,17 @@ void kernel_update_multi(struct dplane_ctx_list_head *ctx_list)
 			nl_batch_send(&batch);
 
 		/*
+		 * The namespace of the context may be gone since it was
+		 * queued: its socket is closed, or its fd reused by another
+		 * namespace.
+		 */
+		if (!kernel_dplane_ctx_sock_open(ctx)) {
+			dplane_ctx_set_status(ctx, ZEBRA_DPLANE_REQUEST_FAILURE);
+			dplane_ctx_enqueue_tail(&(batch.ctx_list), ctx);
+			continue;
+		}
+
+		/*
 		 * Assume all messages will succeed and then mark only the ones
 		 * that failed.
 		 */
@@ -1596,6 +1636,8 @@ void kernel_update_multi(struct dplane_ctx_list_head *ctx_list)
 	}
 
 	nl_batch_send(&batch);
+
+	pthread_mutex_unlock(&nl_dplane_mutex);
 
 	dplane_ctx_q_init(ctx_list);
 	dplane_ctx_list_append(ctx_list, &handled_list);
@@ -1876,6 +1918,9 @@ static void kernel_nlsock_fini(struct nlsock *nls)
 
 void kernel_terminate(struct zebra_ns *zns, bool complete)
 {
+	/* Not while the dplane pthread uses these sockets */
+	pthread_mutex_lock(&nl_dplane_mutex);
+
 	kernel_nlsock_fini(&zns->netlink_cmd);
 
 	kernel_nlsock_fini(&zns->netlink_dplane_in);
@@ -1887,6 +1932,8 @@ void kernel_terminate(struct zebra_ns *zns, bool complete)
 	 */
 	if (complete)
 		kernel_nlsock_fini(&zns->netlink_dplane_out);
+
+	pthread_mutex_unlock(&nl_dplane_mutex);
 }
 
 /*
@@ -1896,6 +1943,7 @@ void kernel_router_init(void)
 {
 	/* Init nlsock hash and lock */
 	pthread_mutex_init(&nlsock_mutex, NULL);
+	pthread_mutex_init(&nl_dplane_mutex, NULL);
 	nlsock_hash = hash_create_size(8, kernel_netlink_nlsock_key,
 				       kernel_netlink_nlsock_hash_equal,
 				       "Netlink Socket Hash");
@@ -1909,6 +1957,7 @@ void kernel_router_terminate(void)
 	XFREE(MTYPE_NL_BUF, nl_batch_tx_buf);
 
 	pthread_mutex_destroy(&nlsock_mutex);
+	pthread_mutex_destroy(&nl_dplane_mutex);
 
 	hash_clean_and_free(&nlsock_hash, NULL);
 }

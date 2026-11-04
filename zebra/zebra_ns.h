@@ -32,6 +32,8 @@ struct nlsock {
 	char name[64];
 	/* NETLINK_ROUTE, NETLINK_GENERIC, ... — set at socket creation */
 	int proto;
+	/* Namespace of the socket, set at socket creation */
+	ns_id_t ns_id;
 
 	uint8_t *buf;
 	size_t buflen;
