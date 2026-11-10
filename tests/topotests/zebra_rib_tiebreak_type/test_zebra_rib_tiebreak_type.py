@@ -28,8 +28,10 @@ PREFIX = "10.13.0.0/16"
 RIB_CMD = "show ip route {} json".format(PREFIX)
 BGP_CMD = "show bgp ipv4 unicast {} json".format(PREFIX)
 LOCAL = {"nexthops": [{"ip": "10.0.1.2"}], "bestpath": {"overall": True}}
-REMOTE = {"nexthops": [{"ip": "10.0.12.2"}]}
-REMOTE_BEST = {"nexthops": [{"ip": "10.0.12.2"}], "bestpath": {"overall": True}}
+
+
+def remote_path(metric):
+    return {"nexthops": [{"ip": "10.0.12.2"}], "metric": metric}
 
 
 def build_topo(tgen):
@@ -72,12 +74,13 @@ def expect_rib(router, protocol, msg):
     expect_json(router, RIB_CMD, expected, msg)
 
 
-def expect_local_best_remote_present(router, msg):
-    expect_json(router, BGP_CMD, {"paths": [LOCAL, REMOTE]}, msg)
+def expect_local_best_remote_present(router, metric, msg):
+    expect_json(router, BGP_CMD, {"paths": [LOCAL, remote_path(metric)]}, msg)
 
 
-def expect_remote_best_only(router, msg):
-    expect_json(router, BGP_CMD, {"paths": ["__ordered__", REMOTE_BEST]}, msg)
+def expect_remote_best_only(router, metric, msg):
+    best = dict(remote_path(metric), bestpath={"overall": True})
+    expect_json(router, BGP_CMD, {"paths": ["__ordered__", best]}, msg)
 
 
 def set_metric(router, nexthop, metric):
@@ -105,7 +108,7 @@ def test_tie_static_selected():
     r1 = tgen.gears["r1"]
 
     expect_rib(r1, "static", "r1 static not selected at the tie")
-    expect_local_best_remote_present(r1, "r1 bgpd lost the local path at the tie")
+    expect_local_best_remote_present(r1, 100, "r1 bgpd lost the local path at the tie")
 
 
 def test_peer_better_bgp_selected():
@@ -118,7 +121,7 @@ def test_peer_better_bgp_selected():
     set_metric(tgen.gears["r2"], "10.0.2.2", 99)
 
     expect_rib(r1, "bgp", "r1 bgp not selected with the better peer")
-    expect_remote_best_only(r1, "r1 bgpd best path is not the remote one only")
+    expect_remote_best_only(r1, 99, "r1 bgpd best path is not the remote one only")
 
 
 def test_peer_back_to_tie_static_selected():
@@ -131,7 +134,9 @@ def test_peer_back_to_tie_static_selected():
     set_metric(tgen.gears["r2"], "10.0.2.2", 100)
 
     expect_rib(r1, "static", "r1 static not selected after the peer came back")
-    expect_local_best_remote_present(r1, "r1 bgpd lost the local path after the tie")
+    expect_local_best_remote_present(
+        r1, 100, "r1 bgpd lost the local path after the tie"
+    )
 
 
 def test_static_readded_at_tie_selected():
@@ -144,23 +149,25 @@ def test_static_readded_at_tie_selected():
 
     set_metric(r2, "10.0.2.2", 101)
     expect_rib(r1, "static", "r1 static not selected with the worse peer")
-    expect_json(
-        r1, BGP_CMD, {"paths": [LOCAL]}, "r1 bgpd local path not best with worse peer"
+    expect_local_best_remote_present(
+        r1, 101, "r1 bgpd local path not best with worse peer"
     )
 
     set_metric(r2, "10.0.2.2", 100)
     expect_rib(r1, "static", "r1 static not selected at the tie")
-    expect_local_best_remote_present(r1, "r1 bgpd lost the local path at the tie")
+    expect_local_best_remote_present(r1, 100, "r1 bgpd lost the local path at the tie")
 
     r1.vtysh_cmd(
         "configure terminal\nno ip route {} 10.0.1.2 200 metric 100".format(PREFIX)
     )
     expect_rib(r1, "bgp", "r1 bgp not selected without the static")
-    expect_remote_best_only(r1, "r1 bgpd best path is not the remote one only")
+    expect_remote_best_only(r1, 100, "r1 bgpd best path is not the remote one only")
 
     set_metric(r1, "10.0.1.2", 100)
     expect_rib(r1, "static", "r1 static re-added at the tie not selected")
-    expect_local_best_remote_present(r1, "r1 bgpd lost the local path after re-add")
+    expect_local_best_remote_present(
+        r1, 100, "r1 bgpd lost the local path after re-add"
+    )
 
 
 def test_memory_leak():
