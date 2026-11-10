@@ -149,8 +149,11 @@ def test_static_readded_at_tie_selected():
 
     set_metric(r2, "10.0.2.2", 101)
     expect_rib(r1, "static", "r1 static not selected with the worse peer")
-    expect_local_best_remote_present(
-        r1, 101, "r1 bgpd local path not best with worse peer"
+    expect_json(
+        r1,
+        BGP_CMD,
+        {"paths": ["__ordered__", LOCAL]},
+        "r1 bgpd has not only the local path with worse peer",
     )
 
     set_metric(r2, "10.0.2.2", 100)
